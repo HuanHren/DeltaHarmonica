@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:node="remove" />
+    <application android:name=".IsolatedTestApplication" tools:replace="android:name">
+        <service android:name=".accessibility.TouchAccessibilityService" tools:node="remove" />
+        <service android:name=".overlay.CalibrationOverlayService" tools:node="remove" />
+        <provider android:name="com.huanhren.deltaharmonica.ImportTestProvider"
+            android:authorities="${applicationId}.importprovider"
+            android:exported="false" />
+    </application>
+</manifest>

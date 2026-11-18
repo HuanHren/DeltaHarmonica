@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">DeltaHarmonica</string>
+    <string name="accessibility_description">为你主动发起的触摸测试或演奏派发手势。演奏时读取焦点窗口的应用包名以确认游戏在前台。可在系统设置中关闭。</string>
+    <string name="accessibility_label">DeltaHarmonica 触摸测试</string>
+</resources>
