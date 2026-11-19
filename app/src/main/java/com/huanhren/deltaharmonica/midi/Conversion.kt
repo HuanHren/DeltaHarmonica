@@ -114,9 +114,10 @@ object ScriptCodec {
     fun decode(value: String): PerformanceScript = json.decodeFromString<PerformanceScript>(value).also(::validate)
     fun decodeImport(value: String): PerformanceScript = try { decode(value) }
         catch (e: IllegalArgumentException) { throw IllegalArgumentException("JSON 脚本无效或版本不受支持", e) }
-    private fun validate(script: PerformanceScript) {
+    fun validate(script: PerformanceScript) {
         require(script.schemaVersion in 1..2 && (script.schemaVersion != 2 || script.provenance != null) && script.instrumentProfileId.isNotBlank() && script.profileFingerprint.isNotBlank() && script.sourceMidiName.isNotBlank() && script.sourceTrack >= 0)
-        require(script.events.size <= 100_000 && script.transpose in -24..24 && script.ppq in 1..32767 && script.timeSignatures.all { it.startTimeMs >= 0 && it.numerator > 0 && it.denominator in 1..128 } && script.tempos.all { it.startTimeMs >= 0 && it.microsecondsPerQuarter > 0 } && script.tempos.zipWithNext().all { (a,b) -> a.startTimeMs <= b.startTimeMs })
+        require(script.events.size <= 100_000) { "演奏事件超过 10 万，无法保存到曲库" }
+        require(script.transpose in -72..72 && script.ppq in 1..32767 && script.timeSignatures.all { it.startTimeMs >= 0 && it.numerator > 0 && it.denominator in 1..128 } && script.tempos.all { it.startTimeMs >= 0 && it.microsecondsPerQuarter > 0 } && script.tempos.zipWithNext().all { (a,b) -> a.startTimeMs <= b.startTimeMs })
         script.provenance?.let { require(it.importStatus in setOf("CLEAN", "WARNING", "RECOVERED") && it.discardedMs >= 0 && it.unmappedCount >= 0 && (it.sourceNoteCount == null || it.sourceNoteCount in 0..100_000) && (it.monophonicCount == null || it.monophonicCount in 0..200_000) && it.warnings.size <= 100_100 && it.warnings.all { warning -> warning.length <= 1000 }) }
         var end = 0L
         script.events.forEach { e ->

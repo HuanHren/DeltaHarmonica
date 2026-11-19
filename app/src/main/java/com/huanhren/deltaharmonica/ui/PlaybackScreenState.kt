@@ -6,6 +6,14 @@ import androidx.compose.runtime.setValue
 import com.huanhren.deltaharmonica.midi.*
 import com.huanhren.deltaharmonica.playback.*
 import com.huanhren.deltaharmonica.data.SongLibraryRepository
+import com.huanhren.deltaharmonica.model.DefaultLayouts
+import com.huanhren.deltaharmonica.model.DefaultProfiles
+import com.huanhren.deltaharmonica.model.InstrumentLayout
+import com.huanhren.deltaharmonica.online.DfhsDecoder
+import com.huanhren.deltaharmonica.online.OnlineSongConverter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 enum class PlaybackRange { FIRST_8, FIRST_16, ALL;
     fun count(total: Int): Int = when(this) { FIRST_8 -> minOf(8,total); FIRST_16 -> minOf(16,total); ALL -> total }
@@ -69,21 +77,42 @@ private fun ensureLibraryIdle(workspace: MidiWorkspace) {
         PlaybackPreparation.cancelPendingStart != null).canStart && !workspace.stateDialog && !workspace.confirmPlayback) { "播放会话尚未结束" }
 }
 
-suspend fun loadLibrarySong(repository: SongLibraryRepository, id: String, workspace: MidiWorkspace) {
+internal suspend fun loadLibrarySong(
+    repository: SongLibraryRepository,
+    id: String,
+    workspace: MidiWorkspace,
+    layout: InstrumentLayout? = null,
+    options: OnlineConversionOptions? = null,
+) {
     val request = workspace.beginActivation()
     ensureLibraryIdle(workspace)
     val item = requireNotNull(repository.get(id)) { "曲目不存在" }
-    repository.readOriginal(id)
-    val script = repository.readScript(id)
-    val changes = script.events.zipWithNext().sumOf { (a,b) -> (if (a.pitchRegion != b.pitchRegion) 1 else 0) + (if (a.semitoneEnabled != b.semitoneEnabled) 1 else 0) }
+    val stored = repository.readScript(id)
+    val origin = item.online
+    val conversionLayout = layout ?: if (options != null) DefaultLayouts.create() else null
+    val profile = conversionLayout?.profile ?: DefaultProfiles.delta()
+    val report = if (origin != null && conversionLayout != null &&
+        (!ScriptConverter.matchesProfile(stored, profile, conversionLayout) ||
+            (options != null && (options.policy != stored.monophonyPolicy || options.transpose != origin.userTranspose)))) {
+        val original = repository.readOriginal(id)
+        withContext(Dispatchers.Default) {
+            val score = DfhsDecoder.decode(original) { ensureActive() }
+            OnlineSongConverter.convert(score, item.originalFileName, options?.policy ?: stored.monophonyPolicy,
+                options?.transpose ?: origin.userTranspose, profile, conversionLayout) { ensureActive() }
+        }
+    } else withContext(Dispatchers.Default) {
+        val changes = stored.events.zipWithNext().sumOf { (a,b) -> (if (a.pitchRegion != b.pitchRegion) 1 else 0) + (if (a.semitoneEnabled != b.semitoneEnabled) 1 else 0) }
+        ConversionReport(stored, item.warnings, changes)
+    }
+    val script = report.script
     workspace.commitActivation(request) {
         ensureLibraryIdle(workspace)
         PlaybackPreparation.clearCompletedHistory()
         PlaybackPreparation.pending = null
         workspace.songId = id
         workspace.name = item.displayName
-        workspace.sourceFormat = item.sourceType.name
-        workspace.report = ConversionReport(script, item.warnings, changes)
+        workspace.sourceFormat = if (origin != null) "DFHS1" else item.sourceType.name
+        workspace.report = report
         workspace.dryRun = null
         workspace.parsed = null
         workspace.selectedTrack = script.sourceTrack

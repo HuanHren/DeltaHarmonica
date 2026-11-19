@@ -8,6 +8,8 @@ import com.huanhren.deltaharmonica.playback.*
 import com.huanhren.deltaharmonica.data.DocumentTransfer
 import com.huanhren.deltaharmonica.data.ImportCoordinator
 import com.huanhren.deltaharmonica.data.ImportPhase
+import com.huanhren.deltaharmonica.data.OnlineSongOrigin
+import com.huanhren.deltaharmonica.data.SongLibraryItem
 import com.huanhren.deltaharmonica.data.SongLibraryRepository
 import com.huanhren.deltaharmonica.data.SongSourceType
 import com.huanhren.deltaharmonica.midi.*
@@ -15,6 +17,11 @@ import com.huanhren.deltaharmonica.accessibility.AccessibilityConnection
 import com.huanhren.deltaharmonica.data.LayoutRepository
 import com.huanhren.deltaharmonica.input.*
 import com.huanhren.deltaharmonica.model.*
+import com.huanhren.deltaharmonica.online.DfhsDecoder
+import com.huanhren.deltaharmonica.online.OnlineEntry
+import com.huanhren.deltaharmonica.online.OnlineLibraryRepository
+import com.huanhren.deltaharmonica.online.OnlineScore
+import com.huanhren.deltaharmonica.online.OnlineSongConverter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -25,6 +32,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
+
+internal enum class OnlineSongStage { DOWNLOADING, CONVERTING, SAVING, ACTIVATING }
+
+internal data class OnlineConversionOptions(val policy: MonophonyPolicy, val transpose: Int)
+
+internal class OnlineSongException(message: String, cause: Exception? = null) : IllegalStateException(message, cause)
 
 data class AppUiState(
     val loading: Boolean = true,
@@ -57,6 +71,7 @@ class AppViewModel(
     private val resolver: ContentResolver,
     val preferences: PlayerPreferences? = null,
     val rootUiAllowed: Boolean = true,
+    val onlineLibrary: OnlineLibraryRepository,
 ) : ViewModel() {
     val midiWorkspace = MidiWorkspace().apply {
         preferences?.let {
@@ -88,7 +103,78 @@ class AppViewModel(
     private var libraryRefresh: Job? = null
 
     fun activateSong(id: String, onFinished: (String?) -> Unit) = libraryAction(onFinished) {
-        loadLibrarySong(songs, id, midiWorkspace)
+        loadLibrarySong(songs, id, midiWorkspace, state.value.saved)
+    }
+
+    internal suspend fun prepareOnlineSong(
+        entry: OnlineEntry,
+        score: OnlineScore?,
+        layout: InstrumentLayout?,
+        play: Boolean,
+        onStage: (OnlineSongStage) -> Unit,
+        onProgress: (Long, Long?) -> Unit,
+        update: Boolean = false,
+        options: OnlineConversionOptions? = null,
+    ): SongLibraryItem {
+        if (!currentPlaybackControls().canStart || midiWorkspace.stateDialog || midiWorkspace.confirmPlayback ||
+            imports.state.value.active ||
+            !mutableLibraryBusy.compareAndSet(expect = false, update = true)) {
+            throw OnlineSongException("请先结束当前演奏或曲目操作")
+        }
+        try {
+            val existing = songs.findOnline(entry.id)
+            val item = if (existing != null && !update) existing else {
+                val storedPolicy = MonophonyPolicy.entries.firstOrNull { it.name == existing?.monophonyPolicy }
+                val policy = options?.policy ?: storedPolicy ?: midiWorkspace.candidatePolicy
+                val userTranspose = options?.transpose ?: existing?.online?.userTranspose ?: midiWorkspace.candidateTranspose
+                onStage(OnlineSongStage.DOWNLOADING)
+                val selected = score?.takeIf { !update && it.entry.id == entry.id }
+                    ?: onlineLibrary.detail(entry.id, force = update, onProgress = onProgress)
+                if (update && selected.stale) throw OnlineSongException("暂时无法取得新版曲谱，请联网后重试")
+                onStage(OnlineSongStage.CONVERTING)
+                val conversionLayout = state.value.saved ?: layout ?: state.value.draft ?: DefaultLayouts.create()
+                val (original, report, sourceTranspose) = withContext(Dispatchers.Default) {
+                    try {
+                        val bytes = DfhsDecoder.decodeBase64(selected.payload)
+                        val decoded = DfhsDecoder.decode(bytes) { ensureActive() }
+                        require(decoded.notes.size == selected.entry.noteCount) { "曲谱与详情中的音符数不一致" }
+                        val conversion = OnlineSongConverter.convert(decoded, "${selected.entry.title}.dfhs",
+                            policy, userTranspose, conversionLayout.profile ?: DefaultProfiles.delta(),
+                            conversionLayout) { ensureActive() }
+                        Triple(bytes, conversion, decoded.transpose)
+                    } catch (e: IllegalArgumentException) {
+                        throw OnlineSongException(e.localizedMessage ?: "曲谱损坏或无法转换", e)
+                    }
+                }
+                val meta = selected.entry
+                val origin = OnlineSongOrigin(meta.id, meta.updatedAt, composer = meta.composer, uploader = meta.uploader,
+                    tags = meta.tags, bpm = meta.bpm, difficulty = meta.difficulty, remoteDurationMs = meta.durationMs,
+                    noteCount = meta.noteCount, sourceTranspose = sourceTranspose, userTranspose = userTranspose)
+                onStage(OnlineSongStage.SAVING)
+                try {
+                    songs.addOnline(meta.title, original, report.script, report.warnings, origin, allowNewRevision = update)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    throw OnlineSongException("无法保存曲谱，请检查存储空间后重试", e)
+                }
+            }
+            if (play) {
+                onStage(OnlineSongStage.ACTIVATING)
+                try {
+                    loadLibrarySong(songs, item.id, midiWorkspace, state.value.saved ?: layout, options)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: IllegalArgumentException) {
+                    throw OnlineSongException("曲谱已保存。请检查乐器配置和校准，再打开曲目", e)
+                } catch (e: Exception) {
+                    throw OnlineSongException("曲谱已保存，暂时无法打开，请从本地曲库重试", e)
+                }
+            }
+            return item
+        } finally {
+            mutableLibraryBusy.value = false
+        }
     }
 
     fun renameSong(id: String, name: String, onFinished: (String?) -> Unit) = libraryAction(onFinished) {
@@ -194,8 +280,9 @@ class AppViewModel(
     val imports = ImportCoordinator(viewModelScope)
 
     private val importPipeline = ImportPipeline(songs, midiWorkspace, imports)
-    fun importDocument(uri: Uri): Boolean = importPipeline.importDocument { DocumentTransfer.read(resolver, uri) }
-    fun convertMidi(layout: InstrumentLayout?): Boolean = importPipeline.convertMidi(layout)
+    fun importDocument(uri: Uri): Boolean = !libraryBusy.value &&
+        importPipeline.importDocument { DocumentTransfer.read(resolver, uri) }
+    fun convertMidi(layout: InstrumentLayout?): Boolean = !libraryBusy.value && importPipeline.convertMidi(layout)
     private val mutableState = MutableStateFlow(AppUiState(selectedBackend =
         if (accessibilityBackend.status().availability != BackendAvailability.NOT_ENABLED) "Accessibility" else "Root"))
     val state = mutableState.asStateFlow()

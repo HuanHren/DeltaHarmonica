@@ -5,6 +5,7 @@ import com.huanhren.deltaharmonica.data.LayoutRepository
 import com.huanhren.deltaharmonica.data.SongLibraryRepository
 import com.huanhren.deltaharmonica.input.RootCommandResult
 import com.huanhren.deltaharmonica.input.RootCommandRunner
+import com.huanhren.deltaharmonica.online.OnlineLibraryRepository
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -43,6 +44,7 @@ class IsolatedTestApplication : DeltaHarmonicaApp() {
     })
 
     override fun createSongs() = SongLibraryRepository(newTestDirectory("song_library"))
+    override fun createOnlineLibrary() = OnlineLibraryRepository(newTestDirectory("online_library"))
 
     override fun createRootRunner() = RootCommandRunner { _, _ ->
         RootCommandResult.Failure("Root is disabled in the isolated test host")

@@ -545,7 +545,7 @@ class StudioUiDeviceTest {
             val isolated = app as IsolatedTestApplication
             val songs = SongLibraryRepository(isolated.newTestDirectory(if (landscape) "overlay-native-landscape" else "overlay-native-portrait"))
             val fixture = AppViewModel(app.layouts, app.rootBackend, app.accessibilityBackend, app.backends, songs,
-                app.contentResolver, rootUiAllowed = false)
+                app.contentResolver, rootUiAllowed = false, onlineLibrary = app.onlineLibrary)
             fixture.midiWorkspace.name = "潮汐练习曲"
             val style = OverlayStyle(this, StudioAppearance(theme = ThemeMode.DARK, reducedEffects = !landscape))
             val container = FrameLayout(this).apply { setBackgroundColor(0xFF10161E.toInt()) }

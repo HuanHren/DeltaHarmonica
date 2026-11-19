@@ -63,12 +63,20 @@ class ImportProcessCrashTest {
         return paths.joinToString(File.pathSeparator)
     }
 
+    private fun startWorker(root: File, boundary: String, output: File): Process {
+        val java = File(System.getProperty("java.home"), "bin/java").absolutePath
+        // Android unit tests can exceed Windows' process command-line limit in a linked worktree.
+        val classpath = workerClasspath().replace("\\", "\\\\").replace("\"", "\\\"")
+        val arguments = temporary.newFile()
+        arguments.writeText("-cp\n\"$classpath\"\n")
+        return ProcessBuilder(java, "@${arguments.absolutePath}", ImportCrashWorker::class.java.name, root.absolutePath, boundary)
+            .redirectErrorStream(true).redirectOutput(output).start()
+    }
+
     @Test fun sixHaltedProcessBoundariesRecoverFromDisk() = runBlocking {
         for (boundary in listOf("A","B","C","D","E","F")) {
             val root = temporary.newFolder()
-            val java = File(System.getProperty("java.home"), "bin/java").absolutePath
-            val process = ProcessBuilder(java,"-cp",workerClasspath(),ImportCrashWorker::class.java.name,root.absolutePath,boundary)
-                .redirectErrorStream(true).redirectOutput(root.resolve("worker-output.txt")).start()
+            val process = startWorker(root, boundary, root.resolve("worker-output.txt"))
             if (!process.waitFor(45,TimeUnit.SECONDS)) {
                 process.destroyForcibly()
                 fail("worker $boundary timed out")
@@ -96,11 +104,9 @@ class ImportProcessCrashTest {
 
     @Test fun secondProcessHaltDuringRecoveryRemainsRetryable() = runBlocking {
         val root = temporary.newFolder()
-        val java = File(System.getProperty("java.home"), "bin/java").absolutePath
         for (boundary in listOf("E", "R")) {
             val output = root.resolve("worker-$boundary.txt")
-            val process = ProcessBuilder(java,"-cp",workerClasspath(),ImportCrashWorker::class.java.name,root.absolutePath,boundary)
-                .redirectErrorStream(true).redirectOutput(output).start()
+            val process = startWorker(root, boundary, output)
             if (!process.waitFor(45,TimeUnit.SECONDS)) { process.destroyForcibly(); fail("worker $boundary timed out") }
             assertEquals("worker $boundary: ${output.readText()}",73,process.exitValue())
         }

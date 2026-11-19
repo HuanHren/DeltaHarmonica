@@ -190,7 +190,9 @@ fun AppNavigation(model: AppViewModel, activity: Activity) {
                                     if (animate) CoverTransition(this@SharedTransitionLayout, this@composable, coverOrigin) else null) {
                                     WithPlayerDock(model, { openPlayer("mini", it) }) {
                                         LibraryScreen(model, onImport = { nav.navigate("import") { launchSingleTop = true } },
-                                            onPlayer = { origin -> if (nav.currentDestination?.route == StudioTab.LIBRARY.route) openPlayer(origin) }, onMenu = { quickMenu = true })
+                                            onPlayer = { origin -> if (nav.currentDestination?.route == StudioTab.LIBRARY.route) openPlayer(origin) },
+                                            onMenu = { quickMenu = true },
+                                            onOnline = { nav.navigate("online-library") { launchSingleTop = true } })
                                     }
                                 }
                             }
@@ -201,6 +203,11 @@ fun AppNavigation(model: AppViewModel, activity: Activity) {
                                         onCalibrate = ::calibrate, onOverlay = { activity.openOverlay(CalibrationOverlayService.ACTION_SHOW_PLAYER) },
                                         onCollapse = ::collapsePlayer, startRequested = startRequested, consumeStartRequest = { startRequested = false })
                                 }
+                            }
+                            composable("online-library") {
+                                OnlineLibraryScreen(model, state.saved,
+                                    onBack = { if (nav.currentDestination?.route == "online-library") nav.popBackStack() },
+                                    onPlay = { if (nav.currentDestination?.route == "online-library") openPlayer("online", true) })
                             }
                             composable("import") {
                                 ImportScreen(activity, state.saved, model, onBack = { nav.popBackStack() },

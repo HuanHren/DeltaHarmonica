@@ -38,7 +38,8 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 
 @Composable
-internal fun LibraryScreen(model: AppViewModel, onImport: () -> Unit, onPlayer: (String) -> Unit, onMenu: () -> Unit) {
+internal fun LibraryScreen(model: AppViewModel, onImport: () -> Unit, onPlayer: (String) -> Unit, onMenu: () -> Unit,
+                           onOnline: () -> Unit) {
     val songs by model.songs.items.collectAsStateWithLifecycle()
     val problems by model.songs.problems.collectAsStateWithLifecycle()
     val loading by model.libraryLoading.collectAsStateWithLifecycle()
@@ -115,6 +116,11 @@ internal fun LibraryScreen(model: AppViewModel, onImport: () -> Unit, onPlayer: 
                     foreground = StudioTheme.colorScheme.onPrimaryContainer)
                 MusicIconButton(ProductIcon.More, stringResource(R.string.studio_routes), onMenu, Modifier.testTag("studio/menu"))
             }
+        }
+        if (!searching) {
+            ArrowPreference(title = stringResource(R.string.online_library_title), onClick = onOnline,
+                modifier = Modifier.widthIn(max = Spacing.contentWidth).fillMaxWidth().padding(horizontal = Spacing.page)
+                    .testTag("library/online"))
         }
         LazyColumn(
             Modifier.widthIn(max = Spacing.contentWidth).fillMaxSize().testTag("library/list"),
@@ -199,7 +205,7 @@ internal fun LibraryScreen(model: AppViewModel, onImport: () -> Unit, onPlayer: 
         }
     }
     if (filters) ProductSheet(stringResource(R.string.library_filters), { filters = false }) {
-        val sources = listOf(null, SongSourceType.MIDI, SongSourceType.JSON)
+        val sources = listOf(null, SongSourceType.MIDI, SongSourceType.JSON, SongSourceType.ONLINE_DFHS)
         val sourceNames = sources.map { stringResource(it?.let(::sourceLabel) ?: R.string.library_source_all) }
         Choices(sources, source, { sourceNames[sources.indexOf(it)] }, { source = it })
         val sortNames = SongSort.entries.map {
@@ -243,8 +249,11 @@ internal fun LibraryScreen(model: AppViewModel, onImport: () -> Unit, onPlayer: 
     }
 }
 
-private fun sourceLabel(type: SongSourceType) =
-    if (type == SongSourceType.MIDI) R.string.library_source_midi else R.string.library_source_json
+private fun sourceLabel(type: SongSourceType) = when (type) {
+    SongSourceType.MIDI -> R.string.library_source_midi
+    SongSourceType.JSON -> R.string.library_source_json
+    SongSourceType.ONLINE_DFHS -> R.string.online_source_downloaded
+}
 
 @Composable
 private fun LibraryRow(item: SongLibraryItem, current: Boolean, unavailable: Boolean, editable: Boolean,
