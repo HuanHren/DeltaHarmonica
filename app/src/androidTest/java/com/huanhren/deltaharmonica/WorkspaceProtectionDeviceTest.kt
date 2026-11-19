@@ -64,7 +64,8 @@ class WorkspaceProtectionDeviceTest {
                 activity=resumedIsolatedActivity()
                 val factory=object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST") override fun <T: ViewModel> create(modelClass: Class<T>): T =
-                        AppViewModel(app.layouts,app.rootBackend,app.accessibilityBackend,app.backends,songs,app.contentResolver, rootUiAllowed = false) as T
+                        AppViewModel(app.layouts,app.rootBackend,app.accessibilityBackend,app.backends,songs,app.contentResolver,
+                            rootUiAllowed = false, onlineLibrary = app.onlineLibrary) as T
                 }
                 model=ViewModelProvider(store,factory)[AppViewModel::class.java]
                 activity.setContent { DeltaTheme { AppNavigation(model,activity) } }

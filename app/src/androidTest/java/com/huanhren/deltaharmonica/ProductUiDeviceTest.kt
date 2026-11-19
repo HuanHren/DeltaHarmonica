@@ -98,7 +98,8 @@ class ProductUiDeviceTest {
                     @Suppress("UNCHECKED_CAST")
                     override fun <T : ViewModel> create(modelClass: Class<T>): T =
                         AppViewModel(app.layouts, app.rootBackend, app.accessibilityBackend, app.backends,
-                            songs, app.contentResolver, preferences = app.preferences, rootUiAllowed = false) as T
+                            songs, app.contentResolver, preferences = app.preferences, rootUiAllowed = false,
+                            onlineLibrary = app.onlineLibrary) as T
                 }
                 model = ViewModelProvider(store, factory)[AppViewModel::class.java]
                 activity.setContent {

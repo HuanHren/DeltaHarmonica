@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$HostSha256,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$TestSha256,
-    [switch]$Execute
+    [switch]$Execute,
+    [switch]$LiveOnlineLibrary
 )
 
 $ErrorActionPreference = 'Stop'
@@ -168,10 +169,16 @@ try {
             if ($result -cnotcontains 'Success') { throw 'Package manager did not explicitly confirm installation' }
             Confirm-InstalledApk $apk.expected.applicationId $apk.digest
         }
-        $classes = @('IsolatedStorageDeviceTest','DocumentTransferDeviceTest','ImportLifecycleDeviceTest','MidiImportDeviceTest','WorkspaceProtectionDeviceTest','StageOneDeviceTest#rtlCanvasKeepsPhysicalScreenCoordinates','StageOneDeviceTest#dragSaveRecreateAndReload','ProductUiDeviceTest','StudioUiDeviceTest')
+        $classes = @('IsolatedStorageDeviceTest','DocumentTransferDeviceTest','ImportLifecycleDeviceTest','MidiImportDeviceTest','WorkspaceProtectionDeviceTest','StageOneDeviceTest#rtlCanvasKeepsPhysicalScreenCoordinates','StageOneDeviceTest#dragSaveRecreateAndReload','ProductUiDeviceTest','StudioUiDeviceTest','OnlineLibraryUiDeviceTest')
+        $expectedCount = 32
+        $liveArguments = @()
+        if ($LiveOnlineLibrary) {
+            $classes += 'OnlineLibraryLiveDeviceSmokeTest'
+            $expectedCount += 1
+            $liveArguments = @('-e','liveOnlineLibrary','true')
+        }
         $selection = ($classes | ForEach-Object { "com.huanhren.deltaharmonica.$_" }) -join ','
-        $expectedCount = 28
-        $run = @(Invoke-PinnedAdb ($route + @('shell','am','instrument','--user','0','-w','-r','-e','class',$selection,"$($script:IsolatedTestId)/$runner")) 'instrumentation')
+        $run = @(Invoke-PinnedAdb ($route + @('shell','am','instrument','--user','0','-w','-r','-e','class',$selection) + $liveArguments + @("$($script:IsolatedTestId)/$runner")) 'instrumentation')
         if (($run -join "`n") -match 'FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed|INSTRUMENTATION_STATUS_CODE: -[1-4]' -or
             ($run -join "`n") -notmatch "(?m)^OK \($expectedCount tests?\)\s*$") { throw "Instrumentation did not report all $expectedCount selected tests passing" }
         Write-Output "PASS: $expectedCount isolated Xiaomi instrumentation tests"

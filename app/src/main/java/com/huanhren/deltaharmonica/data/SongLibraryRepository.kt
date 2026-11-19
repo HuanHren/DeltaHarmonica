@@ -12,15 +12,36 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
 import java.util.UUID
 
-@Serializable enum class SongSourceType { MIDI, JSON }
+@Serializable enum class SongSourceType { MIDI, JSON, ONLINE_DFHS }
+
+@Serializable
+data class OnlineSongOrigin(
+    val remoteId: String,
+    val updatedAt: Long,
+    val source: String = "dr-hydra-dfh-public",
+    val composer: String = "",
+    val uploader: String = "",
+    val tags: List<String> = emptyList(),
+    val bpm: Double? = null,
+    val difficulty: Int? = null,
+    val remoteDurationMs: Long? = null,
+    val noteCount: Int? = null,
+    val sourceTranspose: Int = 0,
+    val userTranspose: Int = 0,
+    val revisions: Map<String, Long> = mapOf(remoteId to updatedAt),
+) {
+    val remoteIds: Set<String> get() = revisions.keys
+    fun revision(id: String): Long? = revisions[id]
+}
 
 @Serializable data class SongLibraryItem(
     val id: String, val displayName: String, val originalFileName: String,
@@ -30,6 +51,8 @@ import java.util.UUID
     val monophonyPolicy: String?, val transpose: Int?, val warnings: List<String>,
     val schemaVersion: Int = 1, val contentHash: String, val scriptHash: String,
     val scriptVersion: Int? = null,
+    @OptIn(ExperimentalSerializationApi::class)
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val online: OnlineSongOrigin? = null,
 )
 
 /** Private per-song directories are published only after every artifact and its metadata are written. */
@@ -41,7 +64,11 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
     val items = mutableItems.asStateFlow()
     private val mutableProblems = MutableStateFlow<Map<String, String>>(emptyMap())
     val problems = mutableProblems.asStateFlow()
-    companion object { private val lock = Any(); private const val MAX_BYTES = 2_000_000 }
+    companion object {
+        private val lock = Any()
+        private const val MAX_BYTES = 2_000_000
+        private val onlineId = Regex("[A-Za-z0-9_-]{6,32}")
+    }
 
     private fun hash(bytes: ByteArray): String = operations.sha256(bytes)
     private fun songDir(id: String): File {
@@ -51,7 +78,16 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
     private fun metadata(dir: File): SongLibraryItem {
         val item = json.decodeFromString<SongLibraryItem>(operations.readFile(File(dir, "metadata.json")).toString(Charsets.UTF_8))
         require(item.schemaVersion == 1 && item.id == dir.name && item.originalArtifact == "original" && item.playbackScriptArtifact in setOf("original", "script.json") && (item.playbackScriptArtifact != "original" || item.sourceType == SongSourceType.JSON)) { "不支持的曲库记录" }
+        require((item.sourceType == SongSourceType.ONLINE_DFHS) == (item.online != null)) { "在线曲谱来源无效" }
+        item.online?.let(::validateOnlineOrigin)
         return item
+    }
+
+    private fun validateOnlineOrigin(origin: OnlineSongOrigin) {
+        require(onlineId.matches(origin.remoteId) && origin.revision(origin.remoteId) == origin.updatedAt &&
+            origin.revisions.size <= 50_000 && origin.revisions.all { (id, revision) -> onlineId.matches(id) && revision >= 0 } &&
+            origin.source == "dr-hydra-dfh-public" && origin.sourceTranspose in -48..48 &&
+            origin.userTranspose in -24..24) { "在线曲谱来源无效" }
     }
     private fun scan(): List<SongLibraryItem> = root.listFiles().orEmpty().filter { it.isDirectory && !it.name.startsWith(".") }
         .mapNotNull { runCatching { metadata(it) }.getOrNull() }.sortedWith(compareByDescending<SongLibraryItem> { it.createdAt }.thenBy { it.id })
@@ -62,13 +98,7 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
             .mapNotNull { dir -> runCatching { metadata(dir) }.exceptionOrNull()?.let { dir.name to "曲库记录无法读取，已保留原文件" } }.toMap()
         mutableProblems.value = recoveryIssues + invalidRecords + items.mapNotNull { item ->
             val issue = try {
-                val dir = songDir(item.id)
-                val original = File(dir, item.originalArtifact).readBytes()
-                check(hash(original) == item.contentHash) { "原始文件校验失败" }
-                val script = File(dir, item.playbackScriptArtifact).readBytes()
-                check(hash(script) == item.scriptHash) { "演奏脚本校验失败" }
-                val decoded = ScriptCodec.decode(script.toString(Charsets.UTF_8))
-                check(decoded.events.isNotEmpty() && decoded.events.size == item.eventCount) { "演奏脚本事件无效" }
+                readVerifiedScript(item)
                 null
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { e }
@@ -176,25 +206,86 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
     suspend fun get(id: String): SongLibraryItem? = withContext(Dispatchers.IO) { synchronized(lock) {
         val dir = songDir(id); if (dir.isDirectory) metadata(dir) else null
     } }
-    suspend fun add(name: String, source: SongSourceType, original: ByteArray, script: PerformanceScript, warnings: List<String>): SongLibraryItem = withContext(Dispatchers.IO) { val context = currentCoroutineContext(); synchronized(lock) {
+
+    private fun verified(item: SongLibraryItem): Boolean = try {
+        readVerifiedScript(item)
+        true
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun findOnline(items: List<SongLibraryItem>, remoteId: String): SongLibraryItem? =
+        items.asSequence().filter { it.online?.revision(remoteId) != null }
+            .sortedByDescending { it.online?.revision(remoteId) }
+            .firstOrNull(::verified)
+
+    internal suspend fun findOnline(remoteId: String): SongLibraryItem? = withContext(Dispatchers.IO) {
+        require(onlineId.matches(remoteId)) { "曲谱 ID 无效" }
+        synchronized(lock) { findOnline(scan(), remoteId) }
+    }
+
+    suspend fun add(name: String, source: SongSourceType, original: ByteArray, script: PerformanceScript, warnings: List<String>): SongLibraryItem =
+        add(name, source, original, script, warnings, null, false)
+
+    internal suspend fun addOnline(
+        name: String,
+        original: ByteArray,
+        script: PerformanceScript,
+        warnings: List<String>,
+        origin: OnlineSongOrigin,
+        allowNewRevision: Boolean = false,
+    ): SongLibraryItem = add(name, SongSourceType.ONLINE_DFHS, original, script, warnings, origin, allowNewRevision)
+
+    private suspend fun add(
+        name: String, source: SongSourceType, original: ByteArray, script: PerformanceScript, warnings: List<String>,
+        online: OnlineSongOrigin?, allowNewRevision: Boolean,
+    ): SongLibraryItem = withContext(Dispatchers.IO) { val context = currentCoroutineContext(); synchronized(lock) {
         require(name.isNotBlank() && original.size in 1..MAX_BYTES) { "文件名或大小无效" }
-        val encoded = ScriptCodec.encode(script).toByteArray(Charsets.UTF_8)
+        require((source == SongSourceType.ONLINE_DFHS) == (online != null)) { "在线曲谱来源无效" }
+        online?.let(::validateOnlineOrigin)
         require(script.events.isNotEmpty()) { "脚本没有可播放事件" }
         when (source) {
             SongSourceType.MIDI -> MidiParser.parse(original)
             SongSourceType.JSON -> require(ScriptCodec.decode(original.toString(Charsets.UTF_8)) == script) { "JSON 脚本与原文件不一致" }
+            SongSourceType.ONLINE_DFHS -> Unit // The online import passes already decoded and validated bytes.
         }
         root.mkdirs()
         val originalHash = hash(original)
-        val scriptBytes = if (source == SongSourceType.JSON) original else encoded
+        val existing = scan()
+        if (online != null) {
+            val sameId = findOnline(existing, online.remoteId)
+            val previousRevision = sameId?.online?.revision(online.remoteId)
+            if (sameId != null && (!allowNewRevision || previousRevision == null || previousRevision >= online.updatedAt)) {
+                return@synchronized sameId
+            }
+            val sameContent = sameId?.takeIf { it.contentHash == originalHash }
+                ?: existing.firstOrNull { it.online != null && it.contentHash == originalHash && verified(it) }
+            if (sameContent != null) {
+                context.ensureActive()
+                val origin = requireNotNull(sameContent.online)
+                val revised = sameContent.copy(online = origin.copy(
+                    updatedAt = if (origin.remoteId == online.remoteId) online.updatedAt else origin.updatedAt,
+                    revisions = origin.revisions + (online.remoteId to online.updatedAt),
+                ))
+                validateOnlineOrigin(requireNotNull(revised.online))
+                replaceMetadata(songDir(revised.id), revised)
+                publish()
+                return@synchronized revised
+            }
+        }
+        val scriptBytes = if (source == SongSourceType.JSON) original else ScriptCodec.encode(script).toByteArray(Charsets.UTF_8)
         val scriptHash = hash(scriptBytes)
-        require(scan().none { it.contentHash == originalHash && it.scriptHash == scriptHash }) { "该曲目已导入" }
+        if (online == null) require(existing.none { it.contentHash == originalHash && it.scriptHash == scriptHash }) { "该曲目已导入" }
         val id = UUID.randomUUID().toString(); val now = System.currentTimeMillis()
         val last = script.events.lastOrNull()
-        val item = SongLibraryItem(id, name, name, source, now, now, "original", if (source == SongSourceType.JSON) "original" else "script.json", script.events.size,
-            last?.let { it.startTimeMs + it.durationMs }, if (source == SongSourceType.MIDI) script.sourceTrack else null,
-            if (source == SongSourceType.MIDI) script.monophonyPolicy.name else null,
-            if (source == SongSourceType.MIDI) script.transpose else null, warnings, contentHash = originalHash, scriptHash = scriptHash, scriptVersion = script.schemaVersion)
+        val originalName = if (online == null) name else "$name.dfhs"
+        val item = SongLibraryItem(id, name, originalName, source, now, now, "original", if (source == SongSourceType.JSON) "original" else "script.json", script.events.size,
+            last?.let { it.startTimeMs + it.durationMs }, if (source != SongSourceType.JSON) script.sourceTrack else null,
+            if (source != SongSourceType.JSON) script.monophonyPolicy.name else null,
+            if (source != SongSourceType.JSON) script.transpose else null, warnings, contentHash = originalHash, scriptHash = scriptHash,
+            scriptVersion = script.schemaVersion, online = online)
         val temporary = File(root, ".pending-$id")
         var journal = ImportJournal(UUID.randomUUID().toString(), id, ImportJournalState.PREPARING, temporary.name, id, now, now, originalHash, scriptHash)
         journals.write(journal)
@@ -204,7 +295,7 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
         try {
             operations.writeFile(File(temporary, "original"), original)
             context.ensureActive()
-            if (source == SongSourceType.MIDI) operations.openScriptOutput(File(temporary, "script.json")).use { it.write(scriptBytes) }
+            if (source != SongSourceType.JSON) operations.openScriptOutput(File(temporary, "script.json")).use { it.write(scriptBytes) }
             context.ensureActive()
             operations.writeFile(File(temporary, "metadata.json"), json.encodeToString(item).toByteArray(Charsets.UTF_8))
             context.ensureActive()
@@ -214,13 +305,14 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
             journal = journal.copy(state=ImportJournalState.FILES_READY,updatedAt=System.currentTimeMillis()); journals.write(journal)
             context.ensureActive()
             check(!operations.exists(songDir(id))) { "目标曲目已存在" }
+            // Once publication starts, finish the synchronous commit and notify,
+            // even if the caller leaves. Cancellation still prevents activation.
             operations.publishDirectory(temporary, songDir(id))
-            context.ensureActive()
             verifyPublished(songDir(id),journal)
-            context.ensureActive()
             journal = journal.copy(state=ImportJournalState.COMMITTED,updatedAt=System.currentTimeMillis()); journals.write(journal)
+            publish()
             context.ensureActive()
-            publish(); item
+            item
         } catch (failure: Throwable) {
             primaryFailure = failure
             throw failure
@@ -236,11 +328,18 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
     suspend fun rename(id: String, name: String): SongLibraryItem = withContext(Dispatchers.IO) { synchronized(lock) {
         require(name.isNotBlank()) { "曲目名称不能为空" }
         val dir = songDir(id); val item = metadata(dir).copy(displayName = name.trim(), updatedAt = System.currentTimeMillis())
-        val temp = File(dir, ".metadata-${UUID.randomUUID()}")
-        try { temp.writeText(json.encodeToString(item)); Files.move(temp.toPath(), File(dir, "metadata.json").toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING) }
-        finally { temp.delete() }
+        replaceMetadata(dir, item)
         publish(); item
     } }
+    private fun replaceMetadata(dir: File, item: SongLibraryItem) {
+        val temp = File(dir, ".metadata-${UUID.randomUUID()}")
+        try {
+            operations.writeFile(temp, json.encodeToString(item).toByteArray(Charsets.UTF_8))
+            require(json.decodeFromString<SongLibraryItem>(operations.readFile(temp).toString(Charsets.UTF_8)) == item) { "曲目记录校验失败" }
+            Files.move(temp.toPath(), File(dir, "metadata.json").toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        }
+        finally { temp.delete() }
+    }
     suspend fun delete(id: String): Boolean = withContext(Dispatchers.IO) { synchronized(lock) {
         val dir = songDir(id); if (!dir.exists()) false else {
             val item = metadata(dir)
@@ -263,11 +362,18 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
         check(hash(bytes) == item.contentHash) { "原始文件校验失败" }; bytes
     } }
     suspend fun readScript(id: String): PerformanceScript = withContext(Dispatchers.IO) { synchronized(lock) {
-        val dir = songDir(id); val item = metadata(dir); val bytes = File(dir, item.playbackScriptArtifact).readBytes()
-        if (item.playbackScriptArtifact != item.originalArtifact) {
-            check(hash(operations.readFile(File(dir, item.originalArtifact))) == item.contentHash) { "原始文件校验失败" }
-        }
-        check(hash(bytes) == item.scriptHash) { "演奏脚本校验失败" }
-        ScriptCodec.decode(bytes.toString(Charsets.UTF_8)).also { check(it.events.isNotEmpty() && it.events.size == item.eventCount) { "演奏脚本无效" } }
+        readVerifiedScript(metadata(songDir(id)))
     } }
+
+    private fun readVerifiedScript(item: SongLibraryItem): PerformanceScript {
+        val dir = songDir(item.id)
+        val bytes = operations.readFile(File(dir, item.playbackScriptArtifact))
+        val original = if (item.playbackScriptArtifact == item.originalArtifact) bytes else operations.readFile(File(dir, item.originalArtifact))
+        check(hash(original) == item.contentHash) { "原始文件校验失败" }
+        check(hash(bytes) == item.scriptHash) { "演奏脚本校验失败" }
+        return ScriptCodec.decode(bytes.toString(Charsets.UTF_8)).also {
+            check(it.events.isNotEmpty() && it.events.size == item.eventCount &&
+                (item.scriptVersion == null || item.scriptVersion == it.schemaVersion)) { "演奏脚本无效" }
+        }
+    }
 }

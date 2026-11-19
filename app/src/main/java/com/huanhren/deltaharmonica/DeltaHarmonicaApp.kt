@@ -12,6 +12,7 @@ import com.huanhren.deltaharmonica.input.RootCommandRunner
 import com.huanhren.deltaharmonica.input.ShizukuBackend
 import com.huanhren.deltaharmonica.input.SuCommandRunner
 import com.huanhren.deltaharmonica.input.displaySnapshot
+import com.huanhren.deltaharmonica.online.OnlineLibraryRepository
 
 import com.huanhren.deltaharmonica.ui.AppViewModel
 import com.huanhren.deltaharmonica.ui.PlayerPreferences
@@ -22,6 +23,7 @@ import androidx.lifecycle.ViewModelStore
 open class DeltaHarmonicaApp : Application() {
     protected open fun createLayouts() = LayoutRepository(layoutDataStore)
     protected open fun createSongs() = SongLibraryRepository(filesDir.resolve("song_library"))
+    protected open fun createOnlineLibrary() = OnlineLibraryRepository(cacheDir.resolve("online_library"))
     protected open fun createRootRunner(): RootCommandRunner = SuCommandRunner()
 
     open val rootUiAllowed = true
@@ -32,12 +34,13 @@ open class DeltaHarmonicaApp : Application() {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T =
                 AppViewModel(layouts, rootBackend, accessibilityBackend, backends, songs, contentResolver,
-                    preferences, rootUiAllowed) as T
+                    preferences, rootUiAllowed, onlineLibrary) as T
         })[AppViewModel::class]
     }
 
     val layouts by lazy { createLayouts() }
     val songs by lazy { createSongs() }
+    val onlineLibrary by lazy { createOnlineLibrary() }
     val accessibilityBackend by lazy { AccessibilityBackend(this) }
     val rootBackend by lazy {
         val apk = applicationInfo.sourceDir.takeIf { Build.VERSION.SDK_INT >= 34 }
