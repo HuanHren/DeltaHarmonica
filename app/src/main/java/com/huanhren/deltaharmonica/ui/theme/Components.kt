@@ -6,14 +6,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
+import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.overlay.OverlayBottomSheet
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -26,13 +23,21 @@ import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card as MiuixCard
 import top.yukonga.miuix.kmp.basic.Text
 
+internal val LocalStudioGutters = androidx.compose.runtime.staticCompositionLocalOf { PaddingValues() }
+
 @Composable
-fun Page(title: String, modifier: Modifier = Modifier, onBack: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.TopCenter) {
+fun Page(title: String, modifier: Modifier = Modifier, onBack: (() -> Unit)? = null,
+         actions: (@Composable RowScope.() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
+    val gutters = LocalStudioGutters.current
+    Box(Modifier.fillMaxSize().background(StudioTheme.colorScheme.background), contentAlignment = Alignment.TopCenter) {
         Column(modifier.widthIn(max = Spacing.contentWidth).fillMaxWidth().verticalScroll(rememberScrollState())
-            .padding(horizontal = Spacing.page, vertical = Spacing.item), verticalArrangement = Arrangement.spacedBy(Spacing.card)) {
-            onBack?.let { TextButton(onClick = it) { Text("返回") } }
-            PageTitle(title)
+            .padding(horizontal = Spacing.page).padding(top = Spacing.item + gutters.calculateTopPadding(), bottom = Spacing.item + gutters.calculateBottomPadding()), verticalArrangement = Arrangement.spacedBy(Spacing.card)) {
+            onBack?.let { TextAction(onClick = it) { Text(androidx.compose.ui.res.stringResource(com.huanhren.deltaharmonica.R.string.action_back)) } }
+            if (actions == null) PageTitle(title)
+            else Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { PageTitle(title) }
+                actions()
+            }
             content()
         }
     }
@@ -40,18 +45,18 @@ fun Page(title: String, modifier: Modifier = Modifier, onBack: (() -> Unit)? = n
 
 @Composable
 fun PageTitle(title: String) {
-    Text(title, style = MaterialTheme.typography.headlineLarge)
+    Text(title, style = StudioTheme.typography.headlineLarge)
 }
 
 @Composable
 fun SectionTitle(title: String) {
-    Text(title, style = MaterialTheme.typography.titleLarge)
+    Text(title, style = StudioTheme.typography.titleLarge)
 }
 
 @Composable
-fun ProductCard(modifier: Modifier = Modifier, color: Color = MaterialTheme.colorScheme.surface,
+fun ProductCard(modifier: Modifier = Modifier, color: Color = StudioTheme.colorScheme.surface,
                 content: @Composable ColumnScope.() -> Unit) {
-    MiuixCard(modifier.fillMaxWidth(), ShapeTokens.cardRadius, PaddingValues(Spacing.card), color) {
+    MiuixCard(modifier.fillMaxWidth(), ShapeTokens.cardRadius, PaddingValues(Spacing.card), CardDefaults.defaultColors(color = color)) {
         Column(verticalArrangement = Arrangement.spacedBy(Spacing.small), content = content)
     }
 }
@@ -59,15 +64,15 @@ fun ProductCard(modifier: Modifier = Modifier, color: Color = MaterialTheme.colo
 @Composable
 fun PrimaryButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     MiuixButton(onClick = onClick, modifier = modifier.heightIn(min = Spacing.touchTarget), enabled = enabled, colors = ButtonDefaults.buttonColorsPrimary()) {
-        Text(label, color = if (enabled) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.labelLarge)
+        Text(label, color = if (enabled) StudioTheme.colorScheme.onPrimary else StudioTheme.colorScheme.onSurfaceVariant,
+            style = StudioTheme.typography.labelLarge)
     }
 }
 
 @Composable
 fun SupportingText(text: String, modifier: Modifier = Modifier, error: Boolean = false, maxLines: Int = Int.MAX_VALUE) {
-    Text(text, modifier, style = MaterialTheme.typography.bodyMedium, maxLines = maxLines, overflow = TextOverflow.Ellipsis,
-        color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+    Text(text, modifier, style = StudioTheme.typography.bodyMedium, maxLines = maxLines, overflow = TextOverflow.Ellipsis,
+        color = if (error) StudioTheme.colorScheme.error else StudioTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
@@ -76,7 +81,7 @@ fun StatusCard(title: String, detail: String, loading: Boolean = false, error: B
     ProductCard {
         SectionTitle(title)
         SupportingText(detail, error = error)
-        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (loading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         action()
     }
 }
@@ -88,7 +93,7 @@ fun <T> Choices(values: List<T>, selected: T, label: (T) -> String, onSelect: (T
         verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
         values.forEach { value ->
             val active = selected == value
-            val colors = MaterialTheme.colorScheme
+            val colors = StudioTheme.colorScheme
             Box(Modifier.clip(ShapeTokens.pill)
                 .background(if (active) colors.primaryContainer else colors.background)
                 .selectable(active, enabled = enabled, role = Role.RadioButton, onClick = { onSelect(value) })
@@ -98,7 +103,7 @@ fun <T> Choices(values: List<T>, selected: T, label: (T) -> String, onSelect: (T
                     !enabled -> colors.onSurfaceVariant.copy(alpha = .65f)
                     active -> colors.onPrimaryContainer
                     else -> colors.onSurfaceVariant
-                }, style = MaterialTheme.typography.labelLarge)
+                }, style = StudioTheme.typography.labelLarge)
             }
         }
     }
@@ -107,20 +112,21 @@ fun <T> Choices(values: List<T>, selected: T, label: (T) -> String, onSelect: (T
 @Composable
 fun ProductDialog(title: String, onClose: () -> Unit, confirm: String, onConfirm: () -> Unit,
                   enabled: Boolean = true, text: @Composable () -> Unit) {
-    AlertDialog(onDismissRequest = onClose, title = { SectionTitle(title) }, text = text,
-        confirmButton = { PrimaryButton(confirm, onConfirm, enabled = enabled) },
-        dismissButton = { TextButton(onClick = onClose) { Text("取消") } })
+    OverlayDialog(show = true, title = title, onDismissRequest = onClose) {
+        Column(verticalArrangement = Arrangement.spacedBy(Spacing.item)) {
+            text()
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.small)) {
+                TextAction(onClick = onClose) { Text(androidx.compose.ui.res.stringResource(android.R.string.cancel)) }
+                PrimaryButton(confirm, onConfirm, enabled = enabled)
+            }
+        }
+    }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProductSheet(title: String, onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
-    ModalBottomSheet(onDismissRequest = onClose, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        shape = ShapeTokens.card, containerColor = MaterialTheme.colorScheme.surface) {
+    OverlayBottomSheet(show = true, title = title, onDismissRequest = onClose) {
         Column(Modifier.fillMaxWidth().padding(horizontal = Spacing.page).padding(bottom = Spacing.section),
-            verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
-            SectionTitle(title)
-            content()
-        }
+            verticalArrangement = Arrangement.spacedBy(Spacing.small), content = content)
     }
 }

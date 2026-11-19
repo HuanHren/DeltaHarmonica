@@ -1,0 +1,49 @@
+<resources xmlns:tools="http://schemas.android.com/tools" tools:locale="zh">
+    <string name="overlay_player">游戏演奏</string>
+    <string name="overlay_choose">选曲</string>
+    <string name="overlay_8_notes">8 音</string>
+    <string name="overlay_16_notes">16 音</string>
+    <string name="overlay_full">整曲</string>
+    <string name="overlay_speed">%1$d×</string>
+    <string name="overlay_progress">演奏进度</string>
+    <string name="overlay_progress_count">%1$d / %2$d</string>
+    <string name="overlay_key">第 %1$d 键</string>
+    <string name="overlay_progress_note">%1$s · %2$d / %3$d</string>
+    <string name="overlay_ready">等待演奏</string>
+    <string name="overlay_checking">正在准备</string>
+    <string name="overlay_wait_game">请返回游戏的口琴界面</string>
+    <string name="overlay_playing">演奏中</string>
+    <string name="overlay_stopping">正在停止，等待释放</string>
+    <string name="overlay_failure_detail">演奏提示 · %1$s</string>
+    <string name="overlay_loading_piece">正在载入曲目…</string>
+    <string name="overlay_empty_library">曲库为空，请在应用中导入 MIDI 或 JSON。</string>
+    <plurals name="overlay_piece_count">
+        <item quantity="other">%1$d 首曲目</item>
+    </plurals>
+    <plurals name="overlay_song_meta">
+        <item quantity="other">%1$d 音 · %2$s</item>
+    </plurals>
+    <string name="overlay_unknown_duration">时长未知</string>
+    <string name="overlay_selected_piece">✓ %1$s</string>
+    <string name="overlay_song_row">%1$s\n%2$s</string>
+    <string name="overlay_sync_hint">根据游戏画面确认当前音区与半音。</string>
+    <string name="overlay_low">低音区</string>
+    <string name="overlay_natural">中音区</string>
+    <string name="overlay_high">高音区</string>
+    <string name="overlay_semitone_off">半音关</string>
+    <string name="overlay_semitone_on">半音开</string>
+    <plurals name="overlay_estimate">
+        <item quantity="other">%1$d 个事件 · 预计 %2$s</item>
+    </plurals>
+    <string name="overlay_calibrated">✓ 目标已校准</string>
+    <string name="overlay_confirm_calibration">确认目标已校准</string>
+    <string name="overlay_stop_progress">停止 %1$d/%2$d</string>
+    <string name="overlay_releasing">等待释放</string>
+    <string name="overlay_completed_restored">演奏已完成，浮窗已恢复</string>
+    <string name="overlay_completed_check">演奏已完成，请检查浮窗</string>
+    <string name="overlay_stopped_restored">演奏已停止，浮窗已恢复</string>
+    <string name="overlay_stopped_check">演奏已停止，请检查浮窗</string>
+    <string name="overlay_wait_cancelled">已取消等待，未发送触摸</string>
+    <string name="overlay_interrupted">演奏中断，请检查游戏与浮窗</string>
+    <string name="overlay_window_timeout">无法确认游戏窗口，请返回游戏的口琴界面并重试</string>
+</resources>

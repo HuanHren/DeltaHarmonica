@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">DeltaHarmonica</string>
+    <string name="accessibility_description">Dispatches gestures for touch tests and performances you start. During playback, it reads the focused app package to confirm the game is in the foreground. You can turn it off in system settings.</string>
+    <string name="accessibility_label">DeltaHarmonica touch service</string>
+</resources>

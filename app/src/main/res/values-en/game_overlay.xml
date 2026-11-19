@@ -1,0 +1,52 @@
+<resources>
+    <string name="overlay_player">Game player</string>
+    <string name="overlay_choose">Choose</string>
+    <string name="overlay_8_notes">8 notes</string>
+    <string name="overlay_16_notes">16 notes</string>
+    <string name="overlay_full">Full piece</string>
+    <string name="overlay_speed">%1$d×</string>
+    <string name="overlay_progress">Playback progress</string>
+    <string name="overlay_progress_count">%1$d / %2$d</string>
+    <string name="overlay_key">Key %1$d</string>
+    <string name="overlay_progress_note">%1$s · %2$d / %3$d</string>
+    <string name="overlay_ready">Ready to play</string>
+    <string name="overlay_checking">Preparing playback</string>
+    <string name="overlay_wait_game">Return to the game’s harmonica screen</string>
+    <string name="overlay_playing">Playing</string>
+    <string name="overlay_stopping">Stopping after touch release</string>
+    <string name="overlay_failure_detail">Details · %1$s</string>
+    <string name="overlay_loading_piece">Loading piece…</string>
+    <string name="overlay_empty_library">Your library is empty. Import MIDI or JSON in the app.</string>
+    <plurals name="overlay_piece_count">
+        <item quantity="one">%1$d piece</item>
+        <item quantity="other">%1$d pieces</item>
+    </plurals>
+    <plurals name="overlay_song_meta">
+        <item quantity="one">%1$d note · %2$s</item>
+        <item quantity="other">%1$d notes · %2$s</item>
+    </plurals>
+    <string name="overlay_unknown_duration">Unknown duration</string>
+    <string name="overlay_selected_piece">✓ %1$s</string>
+    <string name="overlay_song_row">%1$s\n%2$s</string>
+    <string name="overlay_sync_hint">Check the game’s current register and semitone toggle.</string>
+    <string name="overlay_low">Low</string>
+    <string name="overlay_natural">Middle</string>
+    <string name="overlay_high">High</string>
+    <string name="overlay_semitone_off">Semitone off</string>
+    <string name="overlay_semitone_on">Semitone on</string>
+    <plurals name="overlay_estimate">
+        <item quantity="one">%1$d event · about %2$s</item>
+        <item quantity="other">%1$d events · about %2$s</item>
+    </plurals>
+    <string name="overlay_calibrated">✓ Targets calibrated</string>
+    <string name="overlay_confirm_calibration">Confirm targets are calibrated</string>
+    <string name="overlay_stop_progress">Stop %1$d/%2$d</string>
+    <string name="overlay_releasing">Releasing</string>
+    <string name="overlay_completed_restored">Playback complete. Overlay restored.</string>
+    <string name="overlay_completed_check">Playback complete. Check the overlay.</string>
+    <string name="overlay_stopped_restored">Playback stopped. Overlay restored.</string>
+    <string name="overlay_stopped_check">Playback stopped. Check the overlay.</string>
+    <string name="overlay_wait_cancelled">Cancelled before sending any touches</string>
+    <string name="overlay_interrupted">Playback interrupted. Check the game and overlay.</string>
+    <string name="overlay_window_timeout">The game window could not be confirmed. Return to its harmonica screen and try again.</string>
+</resources>

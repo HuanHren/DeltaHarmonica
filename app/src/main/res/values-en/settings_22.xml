@@ -1,0 +1,33 @@
+<resources>
+    <string name="settings_playback">Playback and input</string>
+    <string name="settings_playback_description">Default speed, range and input method</string>
+    <string name="settings_overlay">Overlay and game controls</string>
+    <string name="settings_overlay_description">In-game player and overlay access</string>
+    <string name="settings_calibration">Calibration and layout</string>
+    <string name="settings_calibration_description">Edit, save and test touch points</string>
+    <string name="settings_library">Library and import</string>
+    <string name="settings_library_description">Browse tracks or import MIDI and JSON</string>
+    <string name="settings_system">Permissions and system</string>
+    <string name="settings_system_description">Accessibility, themes and app layout</string>
+    <string name="settings_appearance_description">Theme and language</string>
+    <string name="settings_about">About and diagnostics</string>
+    <string name="settings_about_description">App version, licenses and backend status</string>
+    <string name="settings_playback_summary">%1$s · %2$d×</string>
+    <string name="settings_no_backend">No input backend selected</string>
+    <string name="settings_overlay_allowed">Display over other apps allowed</string>
+    <string name="settings_overlay_blocked">Display over other apps denied</string>
+    <string name="settings_overlay_unavailable">Overlay unavailable</string>
+    <string name="settings_calibration_error">Couldn’t load the calibration layout</string>
+    <string name="settings_accessibility_connected">Accessibility connected</string>
+    <string name="settings_accessibility_disconnected">Accessibility disconnected</string>
+    <string name="settings_backend_accessibility">Accessibility</string>
+    <string name="settings_volume_shortcuts">Volume key shortcuts</string>
+    <string name="settings_advanced">Advanced options</string>
+    <string name="settings_diagnostics">Input diagnostics</string>
+    <string name="settings_expanded">Expanded</string>
+    <string name="settings_collapsed">Collapsed</string>
+    <plurals name="settings_library_count">
+        <item quantity="one">%d track saved</item>
+        <item quantity="other">%d tracks saved</item>
+    </plurals>
+</resources>

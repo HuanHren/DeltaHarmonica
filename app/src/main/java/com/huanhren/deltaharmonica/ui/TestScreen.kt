@@ -7,33 +7,39 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.huanhren.deltaharmonica.R
 import com.huanhren.deltaharmonica.input.DisplaySnapshot
 import com.huanhren.deltaharmonica.input.displaySnapshot
-import com.huanhren.deltaharmonica.model.*
-import kotlin.math.hypot
+import com.huanhren.deltaharmonica.model.Coordinates
+import com.huanhren.deltaharmonica.model.TouchTarget
 import com.huanhren.deltaharmonica.ui.theme.*
+import kotlin.math.hypot
+import top.yukonga.miuix.kmp.basic.Surface
+import top.yukonga.miuix.kmp.basic.Text
 
 @Composable
 fun TestScreen(state: AppUiState, activity: Activity,
                onTest: (String, DisplaySnapshot, () -> DisplaySnapshot) -> Unit,
                onHit: (String?) -> Unit, onCancel: () -> Unit, onBack: () -> Unit) {
     ImmersiveScreen(activity)
-    DisposableEffect(Unit) { onDispose { onCancel() } }
+    val currentCancel by rememberUpdatedState(onCancel)
+    DisposableEffect(Unit) { onDispose { currentCancel() } }
     BackHandler { onCancel(); onBack() }
-    var selectedId by rememberSaveable { mutableStateOf(state.saved?.targets?.firstOrNull()?.id) }
+    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     val radius = with(LocalDensity.current) { 28.dp.toPx() }
     val maxPanelHeight = with(LocalDensity.current) { (LocalWindowInfo.current.containerSize.height * 0.90f).toDp() }
     ScreenCanvas(activity) { geometry ->
         val layout = state.saved
+        val selected = layout?.targets?.firstOrNull { it.id == selectedId } ?: layout?.targets?.firstOrNull()
         val compatible = layout != null && geometry != null && geometry.display.supported &&
             layout.orientation == geometry.display.size.orientation
         if (geometry != null && layout != null && compatible) {
@@ -51,36 +57,73 @@ fun TestScreen(state: AppUiState, activity: Activity,
                 }
             }) {
                 layout.targets.forEach { target ->
-                    key(target.id) { TargetMarker(target, geometry, target.id == selectedId) }
+                    key(target.id) { TargetMarker(target.copy(label = musicTarget(target)), geometry, target.id == selected?.id) }
                 }
             }
         }
+        val testMessage = touchTestMessage(state.testMessage, selected)
         if (state.testing) {
-            Text(state.testMessage, color = Color.White,
-                modifier = Modifier.safeDrawingPadding().padding(16.dp))
+            Text(testMessage, color = Color.White, modifier = Modifier.safeDrawingPadding().padding(Spacing.card))
         } else {
-            Surface(Modifier.safeDrawingPadding().padding(8.dp).widthIn(max = 380.dp).heightIn(max = maxPanelHeight),
-                shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)) {
-                Column(Modifier.verticalScroll(rememberScrollState()).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TextButton(onClick = { onCancel(); onBack() }) { Text("返回") }
-                    Text("测试已保存布局", style = MaterialTheme.typography.titleLarge)
-                    if (!compatible) Text("请使用布局对应方向的全屏主显示屏。", color = MaterialTheme.colorScheme.error)
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Surface(Modifier.safeDrawingPadding().padding(Spacing.small).widthIn(max = 380.dp).heightIn(max = maxPanelHeight),
+                shape = ShapeTokens.card, color = StudioTheme.colorScheme.surface.copy(alpha = 0.96f)) {
+                Column(Modifier.verticalScroll(rememberScrollState()).padding(Spacing.item),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
+                    TextAction(onClick = { onCancel(); onBack() }) { Text(stringResource(R.string.action_back)) }
+                    SectionTitle(stringResource(R.string.touch_test_title))
+                    if (!compatible) SupportingText(stringResource(R.string.touch_test_orientation), error = true)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(Spacing.small)) {
                         layout?.targets?.forEach { target ->
-                            FilterChip(selected = target.id == selectedId, onClick = { selectedId = target.id }, label = { Text(target.label) })
+                            SecondaryAction(onClick = { selectedId = target.id }) {
+                                val label = musicTarget(target)
+                                Text(if (target.id == selected?.id) stringResource(R.string.music_checked, label) else label)
+                            }
                         }
                     }
-                    Button(enabled = compatible && state.selectedBackendStatus?.available == true,
-                        onClick = { if (geometry != null) selectedId?.let { onTest(it, geometry.display) { displaySnapshot(activity) } } }) {
-                        Text("3 秒后测试一次触摸")
-                    }
-                    Text(state.testMessage)
-                    Text(state.hitMessage, style = MaterialTheme.typography.titleSmall)
-                    Text("${state.selectedBackend}：${state.selectedBackendStatus?.message.orEmpty()}", style = MaterialTheme.typography.bodySmall)
-                    Text("测试期间请勿手动触屏。面板会暂时隐藏；返回或切换应用会取消待执行测试。",
-                        style = MaterialTheme.typography.bodySmall)
+                    PrimaryButton(stringResource(R.string.touch_test_start), {
+                        if (geometry != null && selected != null) onTest(selected.id, geometry.display) { displaySnapshot(activity) }
+                    }, enabled = compatible && selected != null && state.selectedBackendStatus?.available == true)
+                    Text(testMessage)
+                    Text(touchHitMessage(state.hitMessage, layout?.targets.orEmpty()), style = StudioTheme.typography.titleMedium)
+                    SupportingText(stringResource(R.string.music_backend_status, state.selectedBackend,
+                        musicBackendStatus(state.selectedBackendStatus?.message)))
+                    SupportingText(stringResource(R.string.touch_test_help))
                 }
             }
         }
     }
+}
+
+@Composable
+private fun touchTestMessage(message: String, target: TouchTarget?): String {
+    val label = when (message) {
+        "尚未测试" -> R.string.touch_test_not_run
+        "请使用布局对应方向的全屏主显示屏" -> R.string.touch_test_orientation
+        "屏幕配置变化，测试已取消" -> R.string.touch_test_display_changed
+        "Root 触摸已派发 · 请核对下方实际命中" -> R.string.touch_test_root_dispatched
+        "系统手势完成 · 请核对下方实际命中" -> R.string.touch_test_system_done
+        "系统取消了手势" -> R.string.touch_test_system_cancelled
+        "系统拒绝了手势" -> R.string.touch_test_system_rejected
+        "等待系统回调超时" -> R.string.touch_test_system_timeout
+        "已有手势正在执行" -> R.string.touch_test_system_busy
+        "测试已取消" -> R.string.touch_test_cancelled
+        else -> null
+    }
+    if (label != null) return stringResource(label)
+    val countdown = message.substringBefore(" 秒后测试 ").toIntOrNull()
+    return if (countdown != null && target != null) stringResource(R.string.touch_test_countdown, countdown, musicTarget(target))
+    else musicBackendStatus(message)
+}
+
+@Composable
+private fun touchHitMessage(message: String, targets: List<TouchTarget>): String = when {
+    message == "尚未收到测试触摸" -> stringResource(R.string.touch_test_no_touch)
+    message == "等待测试触摸…" -> stringResource(R.string.touch_test_wait)
+    message == "测试期间收到触摸，但未命中目标" -> stringResource(R.string.touch_test_missed)
+    message.startsWith("测试期间收到触摸：") -> {
+        val original = message.substringAfter('：')
+        val label = targets.find { it.label == original }?.let { musicTarget(it) } ?: original
+        stringResource(R.string.touch_test_detected, label)
+    }
+    else -> musicDiagnostic(message)
 }

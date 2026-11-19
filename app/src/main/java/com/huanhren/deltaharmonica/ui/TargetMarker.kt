@@ -1,5 +1,7 @@
 package com.huanhren.deltaharmonica.ui
 
+import com.huanhren.deltaharmonica.ui.theme.*
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,8 +12,7 @@ import androidx.compose.foundation.layout.absoluteOffset
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.MaterialTheme
-import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.AbsoluteAlignment
@@ -58,7 +59,7 @@ fun BoxScope.TargetMarker(target: TouchTarget, geometry: CanvasGeometry, isSelec
             latestMove?.invoke(Coordinates.fromLocal(ScreenPoint(x, y), geometry.origin, geometry.display.size))
         }
     }
-    val colors = MaterialTheme.colorScheme
+    val colors = StudioTheme.colorScheme
     Box(modifier, contentAlignment = Alignment.Center) {
         Box(Modifier.size(if (isSelected) 52.dp else 46.dp)
             .background(if (isSelected) colors.primary else Color(0xDD273754), CircleShape)

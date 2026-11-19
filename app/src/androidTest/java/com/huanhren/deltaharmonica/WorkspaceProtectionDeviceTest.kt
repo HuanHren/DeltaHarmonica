@@ -81,8 +81,8 @@ class WorkspaceProtectionDeviceTest {
             }
             compose.onNodeWithTag("nav/player").performClick()
             compose.onNodeWithText("a.json").assertExists()
-            compose.onNodeWithTag("nav/home").performClick()
-            compose.onNodeWithTag("home/import").performClick()
+            compose.waitForTag("nav/library").performClick()
+            compose.waitForTag("library/import").performClick()
             fun deliver(name: String, bytes: ByteArray, path: String = "normal") {
                 app.contentResolver.call(provider,"configure",null,Bundle().apply { putString("name",name); putByteArray("bytes",bytes) })
                 app.contentResolver.call(provider,"release",null,null)
@@ -107,7 +107,7 @@ class WorkspaceProtectionDeviceTest {
             )) {
                 deliver(name,invalid.toByteArray())
                 assertEquals(ImportPhase.FAILED,model.imports.state.value.phase)
-                compose.onNodeWithText("导入失败：JSON 脚本无效或版本不受支持").assertExists()
+                compose.onNodeWithText(app.getString(R.string.import_detail_failed, app.getString(R.string.import_error_json))).assertExists()
                 assertOldWorkspace()
             }
             deliver("read.json", valid.toByteArray(), "io")
@@ -138,7 +138,7 @@ class WorkspaceProtectionDeviceTest {
             deliver("saved-while-busy.json", ScriptCodec.encode(blocked).toByteArray())
             assertEquals(ImportPhase.FAILED,model.imports.state.value.phase)
             assertTrue(model.imports.state.value.committed)
-            compose.onNodeWithText("曲目已保存，加载失败：播放会话尚未结束").assertExists()
+            compose.onNodeWithText(app.getString(R.string.import_detail_failed_saved, app.getString(R.string.music_error_playback_busy))).assertExists()
             val blockedId = requireNotNull(model.imports.state.value.songId)
             assertOldWorkspace(busy, count = 2)
             assertEquals(ImportJournalState.COMMITTED, journal.ids().map(journal::read).single { it.songId == blockedId }.state)
@@ -151,7 +151,7 @@ class WorkspaceProtectionDeviceTest {
             assertEquals(idB,ws.songId); assertEquals(b,ws.report!!.script); assertEquals(3,songs.items.value.size)
             assertNotNull(runBlocking { songs.get(itemA.id) }); assertEquals(b,runBlocking { songs.readScript(idB) })
             assertTrue(PlaybackPreparation.actualTimings.isEmpty()); assertEquals(PlaybackProgress(),PlaybackPreparation.progress.value)
-            compose.onNodeWithText("打开播放器").performScrollTo().performClick()
+            compose.onNodeWithText(app.getString(R.string.import_open_player)).performScrollTo().performClick()
             compose.onNodeWithText("b.json").assertExists()
         } finally {
             instrumentation.runOnMainSync {

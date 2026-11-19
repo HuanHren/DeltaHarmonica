@@ -33,6 +33,7 @@ class ImportLifecycleDeviceTest {
     @get:Rule val compose = createEmptyComposeRule()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val resolver get() = instrumentation.targetContext.contentResolver
+    private val context get() = instrumentation.targetContext
     private val name = "test-import-${UUID.randomUUID()}.json"
     private val script = PerformanceScript(1,"profile","fingerprint",name,0,MonophonyPolicy.HIGHEST_NOTE,false,
         listOf(ScriptEvent(0,120,60,"NOTE_1",Region.NATURAL,false)))
@@ -60,18 +61,19 @@ class ImportLifecycleDeviceTest {
         resolver.call(providerUri,"configure",null,Bundle().apply { putByteArray("bytes",ScriptCodec.encode(script).toByteArray()); putString("name",name) })
         val uri = providerUri.buildUpon().appendPath("normal").build()
         try {
-            compose.onNodeWithTag("home/import").performClick()
+            compose.waitForTag("library/import").performClick()
             instrumentation.runOnMainSync {
                 val app = resumedIsolatedActivity().application as DeltaHarmonicaApp
                 assertTrue(app.model.importDocument(uri))
             }
-            compose.waitUntil(10_000) { compose.onAllNodesWithText("正在读取文件…").fetchSemanticsNodes().isNotEmpty() }
-            compose.onNodeWithText("选择 MIDI / JSON 文件").assertIsNotEnabled()
-            compose.onNodeWithText("返回").performClick()
+            val reading = context.getString(R.string.import_detail_reading)
+            compose.waitUntil(10_000) { compose.onAllNodesWithText(reading).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithTag("import/pick").assertIsNotEnabled()
+            compose.onNodeWithText(context.getString(R.string.action_back)).performClick()
             compose.onNodeWithTag("nav/settings").performClick()
-            compose.onNodeWithTag("nav/home").performClick()
-            compose.onNodeWithTag("home/import").performClick()
-            compose.onNodeWithText("正在读取文件…").assertExists()
+            compose.waitForTag("nav/library").performClick()
+            compose.waitForTag("library/import").performClick()
+            compose.onNodeWithText(reading).assertExists()
             var beforeRotation: MainActivity? = null
             instrumentation.runOnMainSync {
                 val activity = resumedIsolatedActivity()
@@ -81,18 +83,19 @@ class ImportLifecycleDeviceTest {
                 }
             }
             beforeRotation?.let(::waitForRecreatedActivity)
-            compose.onNodeWithText("正在读取文件…").assertExists()
+            compose.onNodeWithText(reading).assertExists()
             lateinit var oldActivity: MainActivity
             instrumentation.runOnMainSync {
                 oldActivity = resumedIsolatedActivity()
                 oldActivity.recreate()
             }
             waitForRecreatedActivity(oldActivity)
-            compose.onNodeWithText("正在读取文件…").assertExists()
+            compose.onNodeWithText(reading).assertExists()
             resolver.call(providerUri,"release",null,null)
-            compose.waitUntil(20_000) { compose.onAllNodesWithText("已保存到曲库，请检查风险并开始预检").fetchSemanticsNodes().isNotEmpty() }
-            compose.onNodeWithText("查看曲库").performScrollTo().performClick()
-            compose.onNodeWithText(name).assertExists()
+            val saved = context.getString(R.string.import_detail_json_saved)
+            compose.waitUntil(20_000) { compose.onAllNodesWithText(saved).fetchSemanticsNodes().isNotEmpty() }
+            compose.onNodeWithText(context.getString(R.string.import_view_library)).performScrollTo().performClick()
+            compose.onNode(hasText(name) and hasAnyAncestor(hasTestTag("library/list"))).assertExists()
             val songs = (instrumentation.targetContext.applicationContext as DeltaHarmonicaApp).songs
             assertEquals(1,songs.items.value.count { it.originalFileName == name })
         } finally {

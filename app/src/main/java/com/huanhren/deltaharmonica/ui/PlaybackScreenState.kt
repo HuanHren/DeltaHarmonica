@@ -23,8 +23,9 @@ internal fun playbackLayoutStatus(saved: Boolean, inSmallWindow: Boolean, matche
 }
 
 fun playbackControls(progress: PlaybackProgress, running: Boolean, waiting: Boolean): PlaybackControls {
-    val busy = running || waiting || progress.phase in setOf(PlaybackStatus.CHECKING,PlaybackStatus.CONFIRMING,PlaybackStatus.WAITING_FOR_GAME,PlaybackStatus.PLAYING,PlaybackStatus.STOPPING)
-    return PlaybackControls(!busy, (running || waiting) && progress.phase != PlaybackStatus.STOPPING, progress.state,
+    val busy = running || waiting || progress.phase in setOf(PlaybackStatus.CHECKING,PlaybackStatus.CONFIRMING,PlaybackStatus.WAITING_FOR_GAME,PlaybackStatus.PLAYING,PlaybackStatus.PAUSING,PlaybackStatus.PAUSED,PlaybackStatus.STOPPING)
+    val canStop = (running || waiting || progress.phase == PlaybackStatus.WAITING_FOR_GAME) && progress.phase != PlaybackStatus.STOPPING
+    return PlaybackControls(!busy, canStop, progress.state,
         if(progress.phase == PlaybackStatus.FAILED && progress.completed < progress.total) progress.completed+1 else null)
 }
 

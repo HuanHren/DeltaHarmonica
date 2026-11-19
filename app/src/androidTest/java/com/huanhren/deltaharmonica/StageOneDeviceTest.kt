@@ -89,20 +89,26 @@ class StageOneDeviceTest {
             }
             landscape
         }
-        compose.waitUntil(10_000) { compose.onAllNodesWithText("校准布局").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("校准布局").performScrollTo().performClick()
+        compose.waitForTag("nav/settings", displayed = true).performClick()
+        compose.waitForTag("studio/settings/category/calibration").performScrollTo().performClick()
+        openCalibrationEditor()
         compose.waitForIdle()
-        val adapt = compose.onAllNodesWithText("使用当前方向并重排")
+        val adapt = compose.onAllNodesWithText(app.getString(R.string.calibration_rearrange))
         if (adapt.fetchSemanticsNodes().isNotEmpty()) {
             adapt.onFirst().performClick()
-            compose.onNodeWithText("恢复草稿").performClick()
+            compose.onNodeWithText(app.getString(R.string.calibration_restore_draft)).performClick()
         }
 
     }
 
+    private fun openCalibrationEditor() {
+        compose.waitForTag("studio/settings/page/calibration", displayed = true)
+        compose.onNodeWithText(app.getString(R.string.calibrate)).performScrollTo().performClick()
+    }
+
     @Test fun dragSaveRecreateAndReload() {
         prepareLandscapeLayout()
-        compose.onNodeWithText("收起面板").performClick()
+        compose.onNodeWithText(app.getString(R.string.calibration_collapse)).performClick()
         // Last key is away from the control panel and has enough room for an inward drag.
         val before = compose.onNodeWithContentDescription("Key 8").fetchSemanticsNode().boundsInRoot.center
         compose.onNodeWithContentDescription("Key 8").performTouchInput {
@@ -111,19 +117,18 @@ class StageOneDeviceTest {
         compose.waitUntil(5_000) { compose.onAllNodesWithContentDescription("Key 8").fetchSemanticsNodes().isNotEmpty() }
         val after = compose.onNodeWithContentDescription("Key 8").fetchSemanticsNode().boundsInRoot.center
         assertTrue("Drag must visibly move the target", after.x < before.x - 30f && after.y < before.y - 30f)
-        compose.onNodeWithText("显示面板").performClick()
+        compose.onNodeWithText(app.getString(R.string.calibration_show)).performClick()
         compose.onNodeWithTag("calibration/save").performScrollTo().performClick()
-        compose.waitUntil(5_000) { compose.onAllNodesWithText("已保存").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(5_000) { compose.onAllNodesWithText(app.getString(R.string.calibration_saved)).fetchSemanticsNodes().isNotEmpty() }
         val saved = runBlocking { app.layouts.load() }!!
         assertEquals(LayoutOrientation.LANDSCAPE, saved.orientation)
         assertEquals((1..8).map { "NOTE_$it" }, saved.targets.filter { it.type == TargetType.NOTE }.map { it.id })
         assertEquals(DefaultLayouts.controls().map { it.id }, saved.targets.filter { it.type != TargetType.NOTE }.map { it.id })
-        instrumentation.runOnMainSync { resumedIsolatedActivity().recreate() }
-        compose.waitForIdle()
+        compose.recreateStudioActivity()
         // Navigation restores the calibration route across recreation.
-        compose.onNodeWithText("返回").performClick()
-        compose.onNodeWithText("校准布局").performScrollTo().performClick()
-        compose.onNodeWithText("收起面板").performClick()
+        compose.onNodeWithText(app.getString(R.string.action_back)).performClick()
+        openCalibrationEditor()
+        compose.onNodeWithText(app.getString(R.string.calibration_collapse)).performClick()
         val restored = compose.onNodeWithContentDescription("Key 8").fetchSemanticsNode().boundsInRoot.center
         assertEquals(after.x, restored.x, 2f)
         assertEquals(after.y, restored.y, 2f)

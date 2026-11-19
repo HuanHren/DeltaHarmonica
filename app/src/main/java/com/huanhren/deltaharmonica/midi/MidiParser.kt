@@ -66,33 +66,43 @@ object MidiParser {
             TimeSignaturePoint(e.tick, p[0].toInt() and 255, 1 shl (p[1].toInt() and 255))
         }
         val tempos = listOf(TempoPoint(0,500000)) + tempoEvents
-        val timeAt = LongArray(tempos.size); for (i in 1 until tempos.size) {
-            timeAt[i] = timeAt[i-1] + (tempos[i].tick - tempos[i-1].tick) * tempos[i-1].microsecondsPerQuarter / ppq
-        }
-        fun ms(tick: Long): Long {
-            var lo=0; var hi=tempos.lastIndex
-            while (lo < hi) { val mid=(lo+hi+1)/2; if (tempos[mid].tick <= tick) lo=mid else hi=mid-1 }
-            return (timeAt[lo]+(tick-tempos[lo].tick)*tempos[lo].microsecondsPerQuarter/ppq)/1000
-        }
-        data class Start(val tick: Long, val track: Int, val velocity: Int)
-        val open = HashMap<Pair<Int,Int>, ArrayDeque<Start>>(); val tracks = List(names.size) { mutableListOf<MidiNote>() }; val warnings = mutableListOf<String>()
+        val clock = MidiTempoClock(ppq, tempos)
+        data class NoteKey(val track: Int, val channel: Int, val pitch: Int)
+        data class Start(val tick: Long, val velocity: Int)
+        val open = HashMap<NoteKey, ArrayDeque<Start>>()
+        val tracks = List(names.size) { mutableListOf<MidiNote>() }
+        val warnings = mutableListOf<String>()
+        var roundedShortNotes = 0
+        var lastNoteEnd = 0L
         for (e in all) {
             val code=e.status and 0xf0; val channel=e.status and 0x0f
             if (code != 0x80 && code != 0x90) continue
             require(e.a in 0..127 && e.b in 0..127) { "音符数据超出 MIDI 范围" }
-            val key=channel to e.a
-            if (code == 0x90 && e.b > 0) open.getOrPut(key) { ArrayDeque() }.addLast(Start(e.tick,e.track,e.b))
+            val key = NoteKey(e.track, channel, e.a)
+            if (code == 0x90 && e.b > 0) open.getOrPut(key) { ArrayDeque() }.addLast(Start(e.tick, e.b))
             else {
-                val start = open[key]?.removeFirstOrNull()
+                val started = open[key]
+                val start = started?.removeFirstOrNull()
                 if (start == null) { if (warnings.size < 100) warnings.add("未匹配的 Note Off：轨道 ${e.track+1} 音高 ${e.a}"); continue }
-                val begin = ms(start.tick); val end = ms(e.tick)
-                if (end > begin) tracks[start.track].add(MidiNote(begin,end-begin,e.a,start.velocity,start.track))
-                else if (warnings.size < 100) warnings.add("零时长音符：${e.a}")
+                if (started.isEmpty()) open.remove(key)
+                val begin = clock.millisecondsAt(start.tick)
+                val end = clock.millisecondsAt(e.tick)
+                if (e.tick == start.tick) {
+                    if (warnings.size < 100) warnings.add("零时长音符：${e.a}")
+                    continue
+                }
+                if (end == begin) roundedShortNotes++
+                val duration = (end - begin).coerceAtLeast(1L)
+                tracks[e.track].add(MidiNote(begin, duration, e.a, start.velocity, e.track))
+                lastNoteEnd = maxOf(lastNoteEnd, begin + duration)
             }
         }
-        val unmatched = open.values.sumOf { it.size }; if (unmatched > 0) warnings.add("$unmatched 个 Note On 缺少 Note Off")
-        return ParsedMidi(format,ppq,tracks.mapIndexed { i, n -> MidiTrackInfo(names[i], n.sortedBy { it.startMs }) }, tempos,
-            all.lastOrNull()?.let { ms(it.tick) } ?: 0, warnings, signatures)
+        if (roundedShortNotes > 0) warnings.add("$roundedShortNotes 个音符不足毫秒精度，按 1 ms 保留。")
+        val unmatched = open.values.sumOf { it.size }
+        if (unmatched > 0) warnings.add("$unmatched 个 Note On 缺少 Note Off")
+        val duration = maxOf(lastNoteEnd, all.lastOrNull()?.let { clock.millisecondsAt(it.tick) } ?: 0L)
+        return ParsedMidi(format, ppq, tracks.mapIndexed { i, n -> MidiTrackInfo(names[i], n.sortedBy { it.startMs }) }, tempos,
+            duration, warnings, signatures)
     }
 }
 

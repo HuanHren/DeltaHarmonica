@@ -11,6 +11,8 @@ import com.huanhren.deltaharmonica.input.*
 import com.huanhren.deltaharmonica.model.ScreenPoint
 import com.huanhren.deltaharmonica.playback.CombinedGesture
 import com.huanhren.deltaharmonica.playback.PlaybackPreparation
+import com.huanhren.deltaharmonica.playback.PlaybackInput
+import com.huanhren.deltaharmonica.DeltaHarmonicaApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,7 +44,8 @@ object AccessibilityConnection {
 
 class TouchAccessibilityService : AccessibilityService() {
     private val gestureGate = NoteActionGate()
-    private var interceptedVolumeDown = false
+    private val stopKey = PlaybackKeyPress()
+    private val pauseKey = PlaybackKeyPress()
 
     override fun onServiceConnected() { AccessibilityConnection.attach(this) }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -51,16 +54,21 @@ class TouchAccessibilityService : AccessibilityService() {
         ?.takeIf { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
         ?.root?.packageName?.toString()
     override fun onKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return false
+        val key = when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN -> stopKey
+            KeyEvent.KEYCODE_VOLUME_UP -> pauseKey
+            else -> return false
+        }
         return when (event.action) {
-            KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount == 0) {
-                    val enabled = (application as com.huanhren.deltaharmonica.DeltaHarmonicaApp).preferences.volumeStop.value
-                    interceptedVolumeDown = enabled && PlaybackPreparation.stopPlayback()
-                }
-                interceptedVolumeDown
+            KeyEvent.ACTION_DOWN -> key.down(event.deviceId, event.downTime, repeated = event.repeatCount > 0) {
+                val preferences = (application as DeltaHarmonicaApp).preferences
+                if (key === stopKey) preferences.volumeStop.value && PlaybackPreparation.stopPlayback()
+                else preferences.volumePause.value &&
+                    PlaybackPreparation.activeInput == PlaybackInput.ACCESSIBILITY &&
+                    focusedPackage() == FocusedWindow.GAME_PACKAGE &&
+                    PlaybackPreparation.togglePause()
             }
-            KeyEvent.ACTION_UP -> interceptedVolumeDown.also { interceptedVolumeDown = false }
+            KeyEvent.ACTION_UP -> key.up(event.deviceId, event.downTime)
             else -> false
         }
     }
@@ -73,11 +81,13 @@ class TouchAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    internal suspend fun tap(point: ScreenPoint, durationMs: Long = 60L, onDispatch: (Long) -> Unit = {}, onCallback: (Long) -> Unit = {}): TapResult =
+    internal suspend fun tap(point: ScreenPoint, durationMs: Long = 60L, onDispatch: (Long) -> Unit = {}, onCallback: (Long) -> Unit = {},
+                             expectedPackage: String? = null): TapResult =
         if (durationMs !in 1L..MAX_GESTURE_DURATION_MS) TapResult.Unavailable("时长必须为 1–${MAX_GESTURE_DURATION_MS} 毫秒")
-        else dispatchCombined(CombinedGesture.create(point,durationMs,emptyList()),onDispatch,onCallback)
+        else dispatchCombined(CombinedGesture.create(point, durationMs, emptyList()), onDispatch, onCallback, expectedPackage)
 
-    internal suspend fun dispatchCombined(combined: CombinedGesture, onDispatch: (Long) -> Unit = {}, onCallback: (Long) -> Unit = {}): TapResult = withContext(Dispatchers.Main.immediate) {
+    internal suspend fun dispatchCombined(combined: CombinedGesture, onDispatch: (Long) -> Unit = {}, onCallback: (Long) -> Unit = {},
+                                          expectedPackage: String? = null): TapResult = withContext(Dispatchers.Main.immediate) {
         if (AccessibilityConnection.service !== this@TouchAccessibilityService) {
             return@withContext TapResult.Unavailable("服务已断开")
         }
@@ -114,6 +124,10 @@ class TouchAccessibilityService : AccessibilityService() {
                         }
                     }
                     try {
+                        if (expectedPackage != null && focusedPackage() != expectedPackage) {
+                            finish(TapResult.Unavailable("游戏已失去前台焦点"))
+                            return@suspendCancellableCoroutine
+                        }
                         runCatching { onDispatch(System.nanoTime()/1_000_000) }
                         val accepted = dispatchGesture(gesture, callback, null)
                         if (!accepted) finish(TapResult.Rejected)

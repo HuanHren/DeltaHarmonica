@@ -4,6 +4,21 @@
     <application android:name=".IsolatedTestApplication" tools:replace="android:name">
         <service android:name=".accessibility.TouchAccessibilityService" tools:node="remove" />
         <service android:name=".overlay.CalibrationOverlayService" tools:node="remove" />
+        <!-- Keep the icon preference testable without publishing a launcher entry. -->
+        <activity-alias
+            android:name=".WaveLauncher"
+            android:targetActivity=".MainActivity"
+            android:exported="false"
+            tools:replace="android:exported">
+            <intent-filter tools:node="removeAll" />
+        </activity-alias>
+        <activity-alias
+            android:name=".CompassLauncher"
+            android:targetActivity=".MainActivity"
+            android:exported="false"
+            tools:replace="android:exported">
+            <intent-filter tools:node="removeAll" />
+        </activity-alias>
         <provider android:name="com.huanhren.deltaharmonica.ImportTestProvider"
             android:authorities="${applicationId}.importprovider"
             android:exported="false" />

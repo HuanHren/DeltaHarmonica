@@ -1,6 +1,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'android-test-safety.ps1')
+$script:SupportedApkAgpVersion = '9.5.1'
 
 function Get-ApkAudit {
     param([Parameter(Mandatory)][string]$Apk,[switch]$Instrumentation)
@@ -43,18 +44,18 @@ function New-ApkProvenance {
     $rootBuild=Join-Path $script:SafetyProjectRoot 'build.gradle.kts'
     $appBuild=Join-Path $script:SafetyProjectRoot 'app/build.gradle.kts'
     $agpDeclarations=[regex]::Matches((Get-Content -LiteralPath $rootBuild -Raw), 'id\("com\.android\.application"\)\s+version\s+"([^"]+)"')
-    if ($agpDeclarations.Count -ne 1 -or $agpDeclarations[0].Groups[1].Value -cne '8.9.2') { throw 'Unsupported or ambiguous AGP declaration' }
+    if ($agpDeclarations.Count -ne 1 -or $agpDeclarations[0].Groups[1].Value -cne $script:SupportedApkAgpVersion) { throw 'Unsupported or ambiguous AGP declaration' }
     $validated=Assert-ApkPair $aapt $HostApk $TestApk $hostMetadata $testMetadata
     $hostAudit=Get-ApkAudit $HostApk
     $testAudit=Get-ApkAudit $TestApk -Instrumentation
     if ($hostAudit.certificateSha256 -cne $testAudit.certificateSha256) { throw 'Host and test signing certificates differ' }
     if ($hostAudit.apkSha256 -cne $validated.AppHash.ToLowerInvariant() -or $testAudit.apkSha256 -cne $validated.TestHash.ToLowerInvariant()) { throw 'APK changed while recording provenance' }
-    return [pscustomobject]@{ schemaVersion=1; buildVariant='instrumented'; agpVersion='8.9.2'; pairScope='observed-together-not-build-session-proof'; host=$hostAudit; test=$testAudit; hostMetadataSha256=(Get-FileHash -LiteralPath $hostMetadata -Algorithm SHA256).Hash.ToLowerInvariant(); testMetadataSha256=(Get-FileHash -LiteralPath $testMetadata -Algorithm SHA256).Hash.ToLowerInvariant(); rootBuildSha256=(Get-FileHash -LiteralPath $rootBuild -Algorithm SHA256).Hash.ToLowerInvariant(); appBuildSha256=(Get-FileHash -LiteralPath $appBuild -Algorithm SHA256).Hash.ToLowerInvariant() }
+    return [pscustomobject]@{ schemaVersion=1; buildVariant='instrumented'; agpVersion=$script:SupportedApkAgpVersion; pairScope='observed-together-not-build-session-proof'; host=$hostAudit; test=$testAudit; hostMetadataSha256=(Get-FileHash -LiteralPath $hostMetadata -Algorithm SHA256).Hash.ToLowerInvariant(); testMetadataSha256=(Get-FileHash -LiteralPath $testMetadata -Algorithm SHA256).Hash.ToLowerInvariant(); rootBuildSha256=(Get-FileHash -LiteralPath $rootBuild -Algorithm SHA256).Hash.ToLowerInvariant(); appBuildSha256=(Get-FileHash -LiteralPath $appBuild -Algorithm SHA256).Hash.ToLowerInvariant() }
 }
 
 function Assert-ApkSnapshotMatches {
     param($Record,[string]$HostApk,[string]$TestApk)
-    if ($null -eq $Record -or $Record.schemaVersion -ne 1 -or $Record.buildVariant -cne 'instrumented' -or $Record.agpVersion -cne '8.9.2' -or $Record.pairScope -cne 'observed-together-not-build-session-proof') { throw 'Missing, unsupported, or invalid provenance' }
+    if ($null -eq $Record -or $Record.schemaVersion -ne 1 -or $Record.buildVariant -cne 'instrumented' -or $Record.agpVersion -cne $script:SupportedApkAgpVersion -or $Record.pairScope -cne 'observed-together-not-build-session-proof') { throw 'Missing, unsupported, or invalid provenance' }
     $actual=New-ApkProvenance -HostApk $HostApk -TestApk $TestApk
     foreach ($key in @('hostMetadataSha256','testMetadataSha256','rootBuildSha256','appBuildSha256')) { if ($Record.$key -cne $actual.$key) { throw "Provenance differs: $key" } }
     foreach ($part in @('host','test')) {

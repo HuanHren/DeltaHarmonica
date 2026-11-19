@@ -1,0 +1,33 @@
+<resources>
+    <string name="library_import_track">Import track</string>
+    <string name="library_clear_query">Clear search</string>
+    <string name="library_read_retry">Could not read the library. Try again.</string>
+    <string name="library_search_results">Search results</string>
+    <string name="library_all_tracks">All tracks</string>
+    <string name="library_filters">Filter and sort</string>
+    <string name="library_renamed">Track renamed</string>
+    <string name="library_deleted">Track deleted</string>
+    <string name="library_track_meta">%1$s · %2$s</string>
+    <string name="library_track_actions">Actions for %1$s</string>
+    <string name="session_expand">Expand player</string>
+    <string name="session_collapse">Collapse player</string>
+    <string name="session_pause">Pause</string>
+    <string name="session_pausing">Pausing</string>
+    <string name="session_paused">Paused</string>
+    <string name="session_resume">Resume</string>
+    <string name="player_more_details">Performance details</string>
+    <string name="player_range_title">Performance range</string>
+    <string name="player_speed_title">Performance speed</string>
+    <string name="player_not_calibrated">Calibrate the note positions before playing.</string>
+    <string name="player_open_game_controls">In-game controls</string>
+    <string name="studio_overlay_group">Floating controls</string>
+    <string name="studio_library_group">Library</string>
+    <string name="studio_project_source">Project and source code</string>
+    <string name="studio_default_range">Default performance range</string>
+    <string name="studio_accessibility_on">Connected</string>
+    <string name="studio_accessibility_off">Disconnected</string>
+    <string name="studio_no_browser">No browser found.</string>
+    <string name="studio_workspace_look">Workspace and launcher</string>
+    <string name="session_overlay_timing">%1$s · %2$s</string>
+    <string name="studio_miuix_license">Miuix license</string>
+</resources>

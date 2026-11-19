@@ -1,0 +1,32 @@
+<resources>
+    <string name="settings_playback">演奏与输入</string>
+    <string name="settings_playback_description">默认速度、范围与输入方式</string>
+    <string name="settings_overlay">悬浮窗与游戏内控制</string>
+    <string name="settings_overlay_description">游戏内播放器与悬浮窗权限</string>
+    <string name="settings_calibration">校准与布局</string>
+    <string name="settings_calibration_description">编辑、保存和测试校准点</string>
+    <string name="settings_library">曲库与导入</string>
+    <string name="settings_library_description">浏览曲库，导入 MIDI 或 JSON</string>
+    <string name="settings_system">权限与系统</string>
+    <string name="settings_system_description">无障碍、主题与应用界面</string>
+    <string name="settings_appearance_description">主题与语言</string>
+    <string name="settings_about">关于与诊断</string>
+    <string name="settings_about_description">应用版本、许可与后端状态</string>
+    <string name="settings_playback_summary">%1$s · %2$d×</string>
+    <string name="settings_no_backend">未选择输入后端</string>
+    <string name="settings_overlay_allowed">已允许在其他应用上层显示</string>
+    <string name="settings_overlay_blocked">未允许在其他应用上层显示</string>
+    <string name="settings_overlay_unavailable">悬浮窗不可用</string>
+    <string name="settings_calibration_error">校准布局读取失败</string>
+    <string name="settings_accessibility_connected">无障碍已连接</string>
+    <string name="settings_accessibility_disconnected">无障碍未连接</string>
+    <string name="settings_backend_accessibility">无障碍</string>
+    <string name="settings_volume_shortcuts">音量键快捷操作</string>
+    <string name="settings_advanced">高级选项</string>
+    <string name="settings_diagnostics">输入诊断</string>
+    <string name="settings_expanded">已展开</string>
+    <string name="settings_collapsed">已收起</string>
+    <plurals name="settings_library_count">
+        <item quantity="other">已保存 %d 首曲目</item>
+    </plurals>
+</resources>

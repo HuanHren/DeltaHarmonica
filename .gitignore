@@ -5,6 +5,9 @@
 **/build/
 local.properties
 *.iml
+# Android signing materials
 *.jks
+*.keystore
+keystore.properties
 .superpowers/
 exports/

@@ -1,0 +1,33 @@
+<resources>
+    <string name="library_import_track">导入曲目</string>
+    <string name="library_clear_query">清空搜索</string>
+    <string name="library_read_retry">暂时无法读取曲目，请重试。</string>
+    <string name="library_search_results">搜索结果</string>
+    <string name="library_all_tracks">全部曲目</string>
+    <string name="library_filters">筛选与排序</string>
+    <string name="library_renamed">已重命名曲目</string>
+    <string name="library_deleted">已删除曲目</string>
+    <string name="library_track_meta">%1$s · %2$s</string>
+    <string name="library_track_actions">%1$s的曲目操作</string>
+    <string name="session_expand">展开播放器</string>
+    <string name="session_collapse">收起播放器</string>
+    <string name="session_pause">暂停</string>
+    <string name="session_pausing">正在暂停</string>
+    <string name="session_paused">已暂停</string>
+    <string name="session_resume">继续</string>
+    <string name="player_more_details">演奏详情</string>
+    <string name="player_range_title">演奏范围</string>
+    <string name="player_speed_title">演奏速度</string>
+    <string name="player_not_calibrated">开始演奏前请完成位置校准。</string>
+    <string name="player_open_game_controls">游戏内控制</string>
+    <string name="studio_overlay_group">悬浮窗</string>
+    <string name="studio_library_group">曲库</string>
+    <string name="studio_project_source">项目主页与源代码</string>
+    <string name="studio_default_range">默认演奏范围</string>
+    <string name="studio_accessibility_on">已连接</string>
+    <string name="studio_accessibility_off">未连接</string>
+    <string name="studio_no_browser">未找到浏览器。</string>
+    <string name="studio_workspace_look">工作台与启动器</string>
+    <string name="session_overlay_timing">%1$s · %2$s</string>
+    <string name="studio_miuix_license">Miuix 许可证</string>
+</resources>

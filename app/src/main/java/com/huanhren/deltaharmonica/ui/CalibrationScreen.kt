@@ -4,19 +4,18 @@ import android.app.Activity
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.huanhren.deltaharmonica.R
 import com.huanhren.deltaharmonica.model.*
 import com.huanhren.deltaharmonica.ui.theme.*
 import top.yukonga.miuix.kmp.basic.Text
-import java.util.Locale
 
 @Composable
 fun CalibrationScreen(state: AppUiState, activity: Activity, onSelect: (String) -> Unit,
@@ -33,7 +32,7 @@ fun CalibrationScreen(state: AppUiState, activity: Activity, onSelect: (String) 
         if (geometry != null && layout != null && compatible) {
             layout.targets.forEach { target ->
                 key(target.id) {
-                    TargetMarker(target, geometry, target.id == state.selectedId,
+                    TargetMarker(target.copy(label = musicTarget(target)), geometry, target.id == state.selectedId,
                         onSelect = { onSelect(target.id) },
                         onMove = if (state.saving) null else { point -> onMove(target.id, point) })
                 }
@@ -41,49 +40,67 @@ fun CalibrationScreen(state: AppUiState, activity: Activity, onSelect: (String) 
         }
         Column(Modifier.safeDrawingPadding().padding(Spacing.small).widthIn(max = 328.dp)) {
             if (!expanded) {
-                PrimaryButton("显示面板", { expanded = true })
+                PrimaryButton(stringResource(R.string.calibration_show), { expanded = true })
             } else {
                 ProductCard(Modifier.heightIn(max = panelHeight)) {
                     Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            TextButton(onClick = onBack, enabled = !state.saving) { Text("返回") }
-                            TextButton(onClick = { expanded = false }) { Text("收起面板") }
+                            TextAction(onClick = onBack, enabled = !state.saving) { Text(stringResource(R.string.action_back)) }
+                            TextAction(onClick = { expanded = false }) { Text(stringResource(R.string.calibration_collapse)) }
                         }
-                        SectionTitle("布局校准")
-                        SupportingText("拖动 12 个标记对准游戏按键。收起面板可露出被挡住的标记。")
+                        SectionTitle(stringResource(R.string.calibration_title))
+                        SupportingText(stringResource(R.string.calibration_align_detail, layout?.targets?.size ?: 12))
                         if (!compatible) {
-                            SupportingText("请旋转至${if (layout?.orientation == LayoutOrientation.LANDSCAPE) "横屏" else "竖屏"}并退出分屏。", error = true)
+                            val orientation = stringResource(if (layout?.orientation == LayoutOrientation.LANDSCAPE)
+                                R.string.calibration_landscape else R.string.calibration_portrait)
+                            SupportingText(stringResource(R.string.calibration_need_orientation, orientation), error = true)
                             if (geometry?.display?.supported == true) {
-                                TextButton(onClick = { resetOpen = true }, enabled = !state.saving) { Text("使用当前方向并重排") }
+                                TextAction(onClick = { resetOpen = true }, enabled = !state.saving) {
+                                    Text(stringResource(R.string.calibration_rearrange))
+                                }
                             }
                         }
                         state.selected?.let { target ->
                             val point = geometry?.let { Coordinates.toScreen(target.position, it.display.size) }
-                            SupportingText("${target.label} · " + String.format(Locale.ROOT, "X %.4f  Y %.4f", target.position.x, target.position.y))
-                            point?.let { SupportingText(String.format(Locale.ROOT, "屏幕像素  %.0f, %.0f", it.x, it.y)) }
+                            SupportingText(stringResource(R.string.calibration_target_position, musicTarget(target),
+                                target.position.x, target.position.y))
+                            point?.let { SupportingText(stringResource(R.string.calibration_pixels, it.x, it.y)) }
                         }
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.small)) {
-                            PrimaryButton("保存布局", { geometry?.let { onSave(it.display.size) } },
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.small), verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
+                            PrimaryButton(stringResource(R.string.calibration_save), { geometry?.let { onSave(it.display.size) } },
                                 Modifier.testTag("calibration/save"), enabled = compatible && !state.saving && state.loadError == null)
-                            if (compatible) OutlinedButton(onClick = { resetOpen = true }, enabled = !state.saving) {
-                                Text("恢复默认")
+                            if (compatible) SecondaryAction(onClick = { resetOpen = true }, enabled = !state.saving) {
+                                Text(stringResource(R.string.calibration_default))
                             }
                         }
-                        SupportingText(state.loadError ?: state.message.ifBlank {
-                            when {
-                                state.saving -> "正在保存…"
-                                state.loading -> "正在读取已有布局…"
-                                state.dirty -> "草稿未保存"
-                                else -> "布局已保存"
-                            }
-                        }, error = state.loadError != null)
+                        SupportingText(calibrationStatus(state), error = state.loadError != null || state.message.startsWith("保存失败"))
                     }
                 }
             }
         }
-        if (resetOpen) ProductDialog("恢复默认布局？", { resetOpen = false }, "恢复草稿", {
-            resetOpen = false
-            onReset(if (compatible) null else geometry?.display?.size?.orientation)
-        }) { SupportingText("将恢复草稿中的坐标。点「保存布局」后才会替换已保存的校准。") }
+        if (resetOpen) ProductDialog(stringResource(R.string.calibration_restore_question), { resetOpen = false },
+            stringResource(R.string.calibration_restore_draft), {
+                resetOpen = false
+                onReset(if (compatible) null else geometry?.display?.size?.orientation)
+            }) { SupportingText(stringResource(R.string.calibration_restore_detail)) }
     }
+}
+
+@Composable
+private fun calibrationStatus(state: AppUiState): String {
+    state.loadError?.let { return stringResource(R.string.calibration_load_error, musicDiagnostic(it.substringAfter('：'))) }
+    val label = when {
+        state.saving -> R.string.calibration_saving
+        state.loading -> R.string.calibration_loading
+        state.message == "未保存" -> R.string.calibration_unsaved
+        state.message == "已保存" -> R.string.calibration_saved
+        state.message == "已恢复默认草稿 · 尚未保存" -> R.string.calibration_default_draft
+        state.message.startsWith("保存失败：") ->
+            return stringResource(R.string.calibration_save_error, musicDiagnostic(state.message.substringAfter('：')))
+        state.message.isNotBlank() -> return musicDiagnostic(state.message)
+        state.dirty -> R.string.calibration_dirty
+        state.saved == null -> R.string.calibration_no_layout
+        else -> R.string.calibration_layout_saved
+    }
+    return stringResource(label)
 }

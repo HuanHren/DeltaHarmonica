@@ -58,7 +58,12 @@ class AppViewModel(
     val preferences: PlayerPreferences? = null,
     val rootUiAllowed: Boolean = true,
 ) : ViewModel() {
-    val midiWorkspace = MidiWorkspace().apply { preferences?.let { speed = it.speed.value } }
+    val midiWorkspace = MidiWorkspace().apply {
+        preferences?.let {
+            speed = it.speed.value
+            range = it.range.value
+        }
+    }
     private val mutableLibraryLoading = MutableStateFlow(true)
     val libraryLoading = mutableLibraryLoading.asStateFlow()
     private val mutableLibraryError = MutableStateFlow<String?>(null)
@@ -177,6 +182,11 @@ class AppViewModel(
         PlaybackPreparation.pending = null
     }
 
+    fun setDefaultRange(range: PlaybackRange) {
+        preferences?.setRange(range)
+        changePlan { this.range = range }
+    }
+
     fun setDefaultSpeed(speed: Double) {
         preferences?.setSpeed(speed)
         changePlan { this.speed = speed }
@@ -198,13 +208,10 @@ class AppViewModel(
         viewModelScope.launch {
             var recorded = false
             PlaybackPreparation.progress.collect { progress ->
-                when (progress.phase) {
-                    PlaybackStatus.PLAYING -> if (!recorded && progress.completed > 0) {
-                        midiWorkspace.songId?.let { preferences?.recordSession(it) }
-                        recorded = true
-                    }
-                    PlaybackStatus.READY, PlaybackStatus.FAILED, PlaybackStatus.COMPLETED -> recorded = false
-                    else -> Unit
+                if (progress.phase == PlaybackStatus.READY) recorded = false
+                if (!recorded && progress.completed > 0) {
+                    midiWorkspace.songId?.let { preferences?.recordSession(it) }
+                    recorded = true
                 }
             }
         }

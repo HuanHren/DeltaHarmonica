@@ -11,6 +11,22 @@ class PlaybackRunnerTest {
     private val layout = DefaultLayouts.create(1).copy(referenceDisplay=ReferenceDisplay(2670,1200))
     private val profile = layout.profile!!
     private val script = PerformanceScript(schemaVersion=2,instrumentProfileId=profile.id,profileFingerprint=ScriptConverter.fingerprint(profile,layout),sourceMidiName="x",sourceTrack=0,monophonyPolicy=MonophonyPolicy.HIGHEST_NOTE,mappingVerified=false,events=(0..7).map { ScriptEvent(it*300L,100,62,"NOTE_2",Region.NATURAL,false) },provenance=ScriptProvenance("CLEAN",emptyList(),0,0))
+    @Test fun stopCancelsAnArmedRequestBeforeTheServiceRegistersItsCancellation() {
+        val plan = PlaybackPlanner.plan(script, layout, Region.NATURAL, false, 0, 2, 1.0)
+        val prior = PlaybackPreparation.progress.value
+        try {
+            PlaybackPreparation.pending = PreparedPlayback(script, plan, Region.NATURAL, false, 0, 2, 1.0, true)
+            PlaybackPreparation.progress.value = PlaybackProgress.waitingForGame(plan)
+            assertTrue(PlaybackPreparation.stopPlayback())
+            assertNull(PlaybackPreparation.pending)
+            assertTrue(PlaybackPreparation.progress.value.stopped)
+            assertEquals(PlaybackStatus.COMPLETED, PlaybackPreparation.progress.value.phase)
+        } finally {
+            PlaybackPreparation.pending = null
+            PlaybackPreparation.progress.value = prior
+        }
+    }
+
     @Test fun stopWaitsForCurrentGestureAndRestoresOnce() = runBlocking {
         val plan=PlaybackPlanner.plan(script,layout,Region.NATURAL,false,0,8,1.0)
         val runner=PlaybackRunner(); val started=CompletableDeferred<Unit>(); val release=CompletableDeferred<Unit>()
@@ -21,6 +37,58 @@ class PlaybackRunnerTest {
         started.await(); runner.requestStop(); assertFalse(job.isCompleted)
         release.complete(Unit); val result=job.await()
         assertEquals(1,calls); assertEquals(1,restore); assertEquals(7,result.remaining); assertTrue(result.stopped)
+    }
+    @Test fun pauseWaitsForReleaseAndResumesWithTheNextNote() = runBlocking {
+        val plan = PlaybackPlanner.plan(script, layout, Region.NATURAL, false, 0, 2, 1.0)
+        val runner = PlaybackRunner()
+        val down = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val paused = CompletableDeferred<Unit>()
+        val resuming = CompletableDeferred<Unit>()
+        val controlsRestored = CompletableDeferred<Unit>()
+        var calls = 0
+        val result = async {
+            runner.run(plan, {}, {}, { true }, { _, _ ->
+                if (++calls == 1) { down.complete(Unit); release.await() }
+                TapResult.Completed
+            }, {}, onPhase = { if (it == PlaybackPhase.PAUSED) paused.complete(Unit) },
+                dryRunCompleted = true, warningsConfirmed = true, onResuming = {
+                    resuming.complete(Unit)
+                    controlsRestored.await()
+                })
+        }
+        withTimeout(4000) {
+            down.await()
+            runner.requestPause()
+            assertFalse(paused.isCompleted)
+            release.complete(Unit)
+            paused.await()
+            delay(350)
+            assertEquals(1, calls)
+            runner.requestResume()
+            resuming.await()
+            assertEquals(1, calls)
+            controlsRestored.complete(Unit)
+            assertEquals(2, result.await().completed)
+        }
+    }
+
+    @Test fun stopWhilePausedRestoresWithoutSendingAnotherNote() = runBlocking {
+        val plan = PlaybackPlanner.plan(script, layout, Region.NATURAL, false, 0, 2, 1.0)
+        val runner = PlaybackRunner()
+        var calls = 0
+        var restores = 0
+        val result = withTimeout(4000) {
+            runner.run(plan, {}, {}, { true }, { _, _ ->
+                calls++
+                runner.requestPause()
+                TapResult.Completed
+            }, { restores++ }, onPhase = { if (it == PlaybackPhase.PAUSED) runner.requestStop() },
+                dryRunCompleted = true, warningsConfirmed = true)
+        }
+        assertTrue(result.stopped)
+        assertEquals(1, calls)
+        assertEquals(1, restores)
     }
     @Test fun failureStopsFutureNotesAndRestores() = runBlocking {
         val plan=PlaybackPlanner.plan(script,layout,Region.NATURAL,false,0,8,1.0)

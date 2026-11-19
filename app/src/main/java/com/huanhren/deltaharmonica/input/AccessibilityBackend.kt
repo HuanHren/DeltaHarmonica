@@ -34,15 +34,17 @@ class AccessibilityBackend(context: Context) : InputBackend {
         if (!state.available) return@withContext TapResult.Unavailable(state.message)
         AccessibilityConnection.service?.tap(point) ?: TapResult.Unavailable("服务已断开")
     }
-    suspend fun perform(action: NoteAction, onDispatch: (Long) -> Unit = {}, onCallback: (Long) -> Unit = {}): TapResult = withContext(Dispatchers.Main.immediate) {
+    suspend fun perform(action: NoteAction, onDispatch: (Long) -> Unit = {}, onCallback: (Long) -> Unit = {},
+                        expectedPackage: String? = null): TapResult = withContext(Dispatchers.Main.immediate) {
         val state = status()
         if (!state.available) return@withContext TapResult.Unavailable(state.message)
-        AccessibilityConnection.service?.tap(action.point, action.durationMs,onDispatch,onCallback) ?: TapResult.Unavailable("服务已断开")
+        AccessibilityConnection.service?.tap(action.point, action.durationMs, onDispatch, onCallback, expectedPackage) ?: TapResult.Unavailable("服务已断开")
     }
-    suspend fun performCombined(action: CombinedGesture, onDispatch: (Long) -> Unit = {}, onCallback: (Long) -> Unit = {}): TapResult = withContext(Dispatchers.Main.immediate) {
+    suspend fun performCombined(action: CombinedGesture, onDispatch: (Long) -> Unit = {}, onCallback: (Long) -> Unit = {},
+                                expectedPackage: String? = null): TapResult = withContext(Dispatchers.Main.immediate) {
         val state = status()
         if (!state.available) return@withContext TapResult.Unavailable(state.message)
-        AccessibilityConnection.service?.dispatchCombined(action,onDispatch,onCallback) ?: TapResult.Unavailable("服务已断开")
+        AccessibilityConnection.service?.dispatchCombined(action, onDispatch, onCallback, expectedPackage) ?: TapResult.Unavailable("服务已断开")
     }
 
 }

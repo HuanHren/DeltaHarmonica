@@ -108,6 +108,14 @@ try {
         if ($LASTEXITCODE -ne 0 -or ($tree -match '^\s+A: (split=|android:sharedUserId)')) {
             throw 'Split or shared UID APKs are forbidden'
         }
+        # AndroidX test support has category-only filters for its explicit helper activities.
+        $filters = [regex]::Matches(($tree -join "`n"), '(?m)^([ ]*)E: intent-filter\b[^\r\n]*(?:\r?\n\1[ ]+[^\r\n]*)*')
+        if ($filters | Where-Object {
+            $_.Value -cmatch '"android\.intent\.action\.MAIN"' -and
+            $_.Value -cmatch '"android\.intent\.category\.LAUNCHER"'
+        }) {
+            throw 'Isolated APKs must not publish launcher entries'
+        }
         if (!$apk.isTest -and (($tree -join "`n") -notmatch '\.IsolatedTestApplication"' -or
             ($tree -match 'TouchAccessibilityService|CalibrationOverlayService|SYSTEM_ALERT_WINDOW|^\s+E: instrumentation'))) {
             throw 'Host manifest does not enforce the isolated application boundary'
@@ -160,12 +168,13 @@ try {
             if ($result -cnotcontains 'Success') { throw 'Package manager did not explicitly confirm installation' }
             Confirm-InstalledApk $apk.expected.applicationId $apk.digest
         }
-        $classes = @('IsolatedStorageDeviceTest','DocumentTransferDeviceTest','ImportLifecycleDeviceTest','MidiImportDeviceTest','WorkspaceProtectionDeviceTest','StageOneDeviceTest#rtlCanvasKeepsPhysicalScreenCoordinates','StageOneDeviceTest#dragSaveRecreateAndReload','ProductUiDeviceTest')
+        $classes = @('IsolatedStorageDeviceTest','DocumentTransferDeviceTest','ImportLifecycleDeviceTest','MidiImportDeviceTest','WorkspaceProtectionDeviceTest','StageOneDeviceTest#rtlCanvasKeepsPhysicalScreenCoordinates','StageOneDeviceTest#dragSaveRecreateAndReload','ProductUiDeviceTest','StudioUiDeviceTest')
         $selection = ($classes | ForEach-Object { "com.huanhren.deltaharmonica.$_" }) -join ','
+        $expectedCount = 28
         $run = @(Invoke-PinnedAdb ($route + @('shell','am','instrument','--user','0','-w','-r','-e','class',$selection,"$($script:IsolatedTestId)/$runner")) 'instrumentation')
         if (($run -join "`n") -match 'FAILURES!!!|INSTRUMENTATION_FAILED|Process crashed|INSTRUMENTATION_STATUS_CODE: -[1-4]' -or
-            ($run -join "`n") -notmatch '(?m)^OK \(12 tests?\)\s*$') { throw 'Instrumentation did not report all twelve selected tests passing' }
-        Write-Output 'PASS: twelve isolated Xiaomi instrumentation tests'
+            ($run -join "`n") -notmatch "(?m)^OK \($expectedCount tests?\)\s*$") { throw "Instrumentation did not report all $expectedCount selected tests passing" }
+        Write-Output "PASS: $expectedCount isolated Xiaomi instrumentation tests"
     } finally {
         $formalAfter = @(Invoke-PinnedAdb ($route + $packageList) 'formal-package-after') -ccontains $formalEntry
         if ($formalBefore -ne $formalAfter) { throw 'Protected package inventory changed' }

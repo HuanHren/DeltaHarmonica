@@ -1,13 +1,13 @@
 package com.huanhren.deltaharmonica.overlay
 
 import android.app.Service
+import android.animation.ValueAnimator
+import android.view.animation.DecelerateInterpolator
 import android.content.Intent
 import android.content.res.Configuration
 import android.view.ViewConfiguration
 import androidx.compose.runtime.snapshotFlow
-import com.huanhren.deltaharmonica.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.combine
-import kotlin.math.abs
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -20,14 +20,10 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
-import android.widget.Spinner
-import android.widget.Button
-import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import com.huanhren.deltaharmonica.DeltaHarmonicaApp
+import com.huanhren.deltaharmonica.R
 import com.huanhren.deltaharmonica.input.TapResult
 import com.huanhren.deltaharmonica.input.NoteAction
 import com.huanhren.deltaharmonica.input.NoteActionType
@@ -39,6 +35,8 @@ import com.huanhren.deltaharmonica.input.RootCleanup
 import com.huanhren.deltaharmonica.input.displaySnapshot
 import com.huanhren.deltaharmonica.model.*
 import com.huanhren.deltaharmonica.playback.*
+import com.huanhren.deltaharmonica.ui.StudioAppearance
+import com.huanhren.deltaharmonica.ui.withStudioLocale
 import kotlinx.coroutines.*
 import kotlin.math.roundToInt
 import kotlin.coroutines.resume
@@ -55,25 +53,38 @@ class CalibrationOverlayService : Service() {
     private val app get() = application as DeltaHarmonicaApp
     private val overlayPrefs by lazy { getSharedPreferences("overlay_ui", MODE_PRIVATE) }
     private var gamePanel: GamePlayerPanel? = null
+    private var gameMotion: ValueAnimator? = null
+    private var gameDisplay: ScreenSize? = null
+    private var gameAnchor = NormalizedPoint(1f, .24f)
+    private var calibrationPanel: GameCalibrationPanel? = null
+    private var calibrationAnchor: NormalizedPoint? = null
+    private var calibrationStylePending = false
+    private var calibrationNotice = ""
+    private var calibrationResult = ""
+    private var calibrationBackendAvailable = false
+    private var calibrationTesting = false
+    private var activePanelDrag: OverlayDrag? = null
+    private var gameCollapsed = true
+    private var gameTargetWidth = 0
+    private var gameTargetHeight = 0
     private var gamePanelJob: Job? = null
     private var openAsPlayer = false
     private var attachedLayout: InstrumentLayout? = null
 
-    private fun overlayStyle(): OverlayStyle {
-        val dark = when (app.preferences.theme.value) {
-            ThemeMode.SYSTEM -> resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
-            ThemeMode.LIGHT -> false
-            ThemeMode.DARK -> true
-        }
-        return OverlayStyle(this, dark)
-    }
+    private fun overlayStyle(appearance: StudioAppearance = app.preferences.appearance.value) =
+        OverlayStyle(withStudioLocale(), appearance)
+
+    private fun overlayText(id: Int) = withStudioLocale().getString(id)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var wm: WindowManager
     private lateinit var displayManager: DisplayManager
     private var panel: View? = null
     private var loadingPanel = false
     private var startAfterLoad = false
-    private val markers = mutableListOf<View>()
+    private data class Marker(val view: TextView, val params: WindowManager.LayoutParams)
+    private val markers = mutableMapOf<String, Marker>()
+    private var markersNeedOrdering = false
     private var layout: InstrumentLayout? = null
     private var snapshot: DisplaySnapshot? = null
     private var selected: String? = null
@@ -95,14 +106,8 @@ class CalibrationOverlayService : Service() {
         get() = PlaybackPreparation.runtimeState.value
         set(value) { PlaybackPreparation.runtimeState.value = value }
     private var controlsCalibrated = false
-    private lateinit var runtimeInfo: TextView
     private var holdDuration = 500L
     private var currentAction: NoteAction? = null
-    private lateinit var durationLabel: TextView
-    private lateinit var serviceStatus: TextView
-    private lateinit var targetInfo: TextView
-    private lateinit var status: TextView
-    private lateinit var toggle: Button
     private val listener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
         override fun onDisplayRemoved(displayId: Int) = checkDisplay()
@@ -115,14 +120,26 @@ class CalibrationOverlayService : Service() {
         displayManager = getSystemService(DisplayManager::class.java)
         displayManager.registerDisplayListener(listener, null)
     }
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        checkDisplay()
+        gamePanel?.updateStyle(overlayStyle())
+        if (activePanelDrag != null && calibrationPanel != null) calibrationStylePending = true
+        else calibrationPanel?.updateStyle(overlayStyle())
+        if (!calibrationTesting) refreshMarkers()
+    }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!Settings.canDrawOverlays(this)) { PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state="悬浮窗权限不可用，请在系统设置中开启",phase=PlaybackStatus.FAILED); stopSelf(); return START_NOT_STICKY }
         val starting = intent?.action == ACTION_START_PLAYBACK
+        if (starting && PlaybackPreparation.pending == null && PlaybackPreparation.progress.value.stopped) {
+            if (panel == null && !loadingPanel) stopSelf()
+            return START_NOT_STICKY
+        }
+        if (!Settings.canDrawOverlays(this)) { PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state="悬浮窗权限不可用，请在系统设置中开启",phase=PlaybackStatus.FAILED); stopSelf(); return START_NOT_STICKY }
         val requestedPlayer = starting || intent?.action == ACTION_SHOW_PLAYER
-        if (panel != null && (testJob?.isActive == true || armJob?.isActive == true)) return START_NOT_STICKY
+        if (panel != null && (saving || testJob?.isActive == true || armJob?.isActive == true)) return START_NOT_STICKY
         if (dirty && requestedPlayer) {
-            status.text = "请先保存校准草稿，再打开播放器"
-            if (starting) rejectPendingStart(status.text.toString())
+            setCalibrationNotice(R.string.game_cal_save_before_player)
+            if (starting) rejectPendingStart(calibrationNotice)
             return START_NOT_STICKY
         }
         if (loadingPanel) {
@@ -144,7 +161,10 @@ class CalibrationOverlayService : Service() {
                 if (existing == null || openAsPlayer != (gamePanel != null)) {
                     detachPanel()
                     if (openAsPlayer) showGamePanel() else showPanel()
-                } else gamePanel?.refresh()
+                } else {
+                    gamePanel?.refresh()
+                    updateCalibrationPanel()
+                }
                 checkDisplay()
                 if (startAfterLoad) { startAfterLoad = false; armPlayback() }
             } catch (e: CancellationException) { throw e }
@@ -158,6 +178,7 @@ class CalibrationOverlayService : Service() {
     }
 
     private fun rejectPendingStart(message: String) {
+        if (PlaybackPreparation.pending == null && PlaybackPreparation.progress.value.stopped) return
         PlaybackPreparation.pending = null
         PlaybackPreparation.progress.value = PlaybackPreparation.progress.value.copy(state = message, phase = PlaybackStatus.FAILED)
     }
@@ -165,8 +186,16 @@ class CalibrationOverlayService : Service() {
     private fun detachPanel() {
         gamePanelJob?.cancel()
         gamePanelJob = null
+        cancelGameMotion()
+        gameDisplay = null
+        activePanelDrag = null
         gamePanel?.dispose()
         gamePanel = null
+        calibrationPanel = null
+        calibrationAnchor = null
+        calibrationNotice = ""
+        calibrationResult = ""
+        calibrationStylePending = false
         removeMarkers()
         panel?.let { if (panelAttached) wm.removeViewImmediate(it) }
         panelAttached = false
@@ -174,23 +203,38 @@ class CalibrationOverlayService : Service() {
     }
 
     private fun showGamePanel() {
-        status = overlayStyle().text("")
         val model = app.model
-        val player = GamePlayerPanel(this, overlayStyle(), model, { attachedLayout }, ::resizeGamePanel,
+        var appearance = app.preferences.appearance.value
+        val style = overlayStyle(appearance)
+        val size = displaySnapshot(this).size
+        val player = GamePlayerPanel(style, model, { attachedLayout }, { resizeGamePanel() },
             ::attachPlayerDrag, onClose = {
                 if (!PlaybackPreparation.stopPlayback()) stopSelf()
-            }, onArm = ::armPlayback)
+            }, onArm = ::armPlayback, displayHeight = size.height, renderBlocked = { activePanelDrag != null })
         gamePanel = player
         panel = player.view
-        panelParams = params(dp(52), dp(52))
-        val start = displaySnapshot(this).size
-        val origin = playerOrigin(start)
-        panelParams?.apply { x = origin.x.roundToInt(); y = origin.y.roundToInt() }
+        gameDisplay = size
+        gameAnchor = readPlayerAnchor(size, player)
+        gameCollapsed = true
+        gameTargetWidth = player.collapsedWidth
+        gameTargetHeight = player.collapsedHeight
+        val origin = playerOrigin(size, player, player.collapsedWidth, player.collapsedHeight)
+        panelParams = params(player.collapsedWidth, player.collapsedHeight).apply {
+            x = origin.x.roundToInt()
+            y = origin.y.roundToInt()
+        }
         wm.addView(player.view, panelParams)
         panelAttached = true
-        resizeGamePanel()
         gamePanelJob = scope.launch {
             launch { PlaybackPreparation.progress.collect(player::applyProgress) }
+            launch {
+                app.preferences.appearance.collect { next ->
+                    if (next != appearance) {
+                        appearance = next
+                        player.updateStyle(overlayStyle(next))
+                    }
+                }
+            }
             launch {
                 combine(model.songs.items, model.songs.problems, model.libraryLoading, model.libraryBusy, model.libraryError) {
                         _, _, _, _, _ -> Unit
@@ -205,65 +249,175 @@ class CalibrationOverlayService : Service() {
         }
     }
 
-    private fun playerOrigin(size: ScreenSize) = ScreenPoint(
-        overlayPrefs.getFloat("x", .88f).coerceIn(0f, 1f) * (size.width - dp(52)).coerceAtLeast(0),
-        overlayPrefs.getFloat("y", .24f).coerceIn(0f, 1f) * (size.height - dp(52)).coerceAtLeast(0),
-    )
+    private fun anchorKey(name: String, size: ScreenSize) = "anchor_" + name + "_" + size.orientation.name
 
-    private fun resizeGamePanel() {
+    private fun readAnchor(key: String): NormalizedPoint? {
+        val x = overlayPrefs.getFloat(key + "_x", Float.NaN)
+        val y = overlayPrefs.getFloat(key + "_y", Float.NaN)
+        return if (x in 0f..1f && y in 0f..1f) NormalizedPoint(x, y) else null
+    }
+
+    private fun writeAnchor(key: String, value: NormalizedPoint) {
+        overlayPrefs.edit().putFloat(key + "_x", value.x).putFloat(key + "_y", value.y).apply()
+    }
+
+    private fun readPlayerAnchor(size: ScreenSize, game: GamePlayerPanel): NormalizedPoint {
+        val key = anchorKey("player", size)
+        readAnchor(key)?.let { return it }
+        val old = size.orientation.name.lowercase(java.util.Locale.ROOT)
+        if (!overlayPrefs.contains("y_$old") && !overlayPrefs.contains("y")) return gameAnchor
+        val x = overlayPrefs.getFloat("x_$old", overlayPrefs.getFloat("x", 1f))
+        val y = overlayPrefs.getFloat("y_$old", overlayPrefs.getFloat("y", .24f))
+        val migrated = playerCapsule(size, game).legacyAnchor(x, y)
+        writeAnchor(key, migrated)
+        return migrated
+    }
+
+    private fun playerCapsule(size: ScreenSize, game: GamePlayerPanel) =
+        OverlayFootprint(size, game.collapsedWidth, game.collapsedHeight, game.screenMargin)
+
+    private fun playerOrigin(size: ScreenSize, game: GamePlayerPanel, width: Int, height: Int): ScreenPoint =
+        OverlayFootprint(size, width, height, game.screenMargin).originOf(gameAnchor, playerCapsule(size, game))
+
+    private fun cancelGameMotion() {
+        gameMotion?.cancel()
+        gameMotion = null
+    }
+
+    private fun updatePanelWindow(lp: WindowManager.LayoutParams, view: View, width: Int, height: Int, origin: ScreenPoint) {
+        val x = origin.x.roundToInt()
+        val y = origin.y.roundToInt()
+        if (!panelAttached || (lp.width == width && lp.height == height && lp.x == x && lp.y == y)) return
+        lp.width = width
+        lp.height = height
+        lp.x = x
+        lp.y = y
+        wm.updateViewLayout(view, lp)
+    }
+
+    private fun animateGameWindow(width: Int, height: Int, target: ScreenPoint, animate: Boolean) {
+        val game = gamePanel ?: return
+        val view = game.view
+        val margin = game.screenMargin
+        val lp = panelParams ?: return
+        val size = gameDisplay ?: return
+        cancelGameMotion()
+        if (!animate || app.preferences.appearance.value.reducedEffects || !ValueAnimator.areAnimatorsEnabled()) {
+            updatePanelWindow(lp, view, width, height, target)
+            return
+        }
+        val startX = lp.x
+        val startY = lp.y
+        val startWidth = lp.width
+        val startHeight = lp.height
+        gameMotion = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 230L
+            interpolator = DecelerateInterpolator(1.65f)
+            addUpdateListener { animation ->
+                val f = animation.animatedValue as Float
+                val w = (startWidth + (width - startWidth) * f).roundToInt()
+                val h = (startHeight + (height - startHeight) * f).roundToInt()
+                val position = ScreenPoint(startX + (target.x - startX) * f, startY + (target.y - startY) * f)
+                updatePanelWindow(lp, view, w, h, OverlayFootprint(size, w, h, margin).clamp(position))
+            }
+            start()
+        }
+    }
+
+    private fun resizeGamePanel(animateReposition: Boolean = false) {
         val game = gamePanel ?: return
         val lp = panelParams ?: return
-        if (!panelAttached) return
-        val size = displaySnapshot(this).size
-        lp.width = if (game.minimized) dp(52) else minOf(dp(292), (size.width - dp(12)).coerceAtLeast(dp(52)))
-        lp.height = if (game.minimized) dp(52) else WindowManager.LayoutParams.WRAP_CONTENT
-        val anchor = playerOrigin(size)
-        lp.x = anchor.x.roundToInt().coerceIn(0, (size.width - lp.width).coerceAtLeast(0))
-        lp.y = anchor.y.roundToInt()
-        wm.updateViewLayout(game.view, lp)
-        game.view.post {
-            if (gamePanel === game && panelAttached) movePanel(ScreenPoint(lp.x.toFloat(), lp.y.toFloat()))
+        if (!panelAttached || activePanelDrag != null) return
+        val size = gameDisplay ?: return
+        val width = if (game.minimized) minOf(game.collapsedWidth, size.width) else
+            minOf(game.preferredWidth, (size.width - 2 * game.screenMargin).coerceAtLeast(1))
+        val height = if (game.minimized) minOf(game.collapsedHeight, size.height) else {
+            game.view.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(size.height, View.MeasureSpec.AT_MOST))
+            game.view.measuredHeight.coerceIn(1, size.height)
+        }
+        val changeMode = gameCollapsed != game.minimized
+        gameCollapsed = game.minimized
+        if (!changeMode && gameMotion?.isRunning == true && gameTargetWidth == width && gameTargetHeight == height) return
+        gameTargetWidth = width
+        gameTargetHeight = height
+        val target = playerOrigin(size, game, width, height)
+        val atTarget = lp.width == width && lp.height == height && lp.x == target.x.roundToInt() && lp.y == target.y.roundToInt()
+        if (!changeMode && atTarget) return
+        animateGameWindow(width, height, target, changeMode || animateReposition)
+    }
+
+    private fun attachPlayerDrag(view: View, onClick: (() -> Unit)?) {
+        attachPanelDrag(view, onClick, beforeDrag = ::cancelGameMotion, margin = { gamePanel?.screenMargin ?: 0 }) { release ->
+            val game = gamePanel ?: return@attachPanelDrag
+            val size = gameDisplay ?: return@attachPanelDrag
+            val lp = panelParams ?: return@attachPanelDrag
+            if (release != null) {
+                val footprint = OverlayFootprint(size, lp.width, lp.height, game.screenMargin)
+                gameAnchor = playerCapsule(size, game).anchorAt(release, footprint, gameAnchor.x)
+                writeAnchor(anchorKey("player", size), gameAnchor)
+            }
+            game.flushPendingRender()
+            resizeGamePanel(animateReposition = release != null)
         }
     }
 
     @android.annotation.SuppressLint("ClickableViewAccessibility")
-    private fun attachPlayerDrag(view: View, onClick: (() -> Unit)?) {
+    private fun attachPanelDrag(
+        handle: View,
+        onClick: (() -> Unit)?,
+        beforeDrag: () -> Unit = {},
+        margin: () -> Int,
+        finish: (ScreenPoint?) -> Unit,
+    ) {
         val threshold = ViewConfiguration.get(this).scaledTouchSlop
-        if (onClick != null) view.setOnClickListener { onClick() }
-        view.setOnTouchListener(object : View.OnTouchListener {
-            private var down = ScreenPoint(0f, 0f)
-            private var origin = ScreenPoint(0f, 0f)
-            private var dragging = false
-            override fun onTouch(v: View, event: MotionEvent): Boolean {
+        if (onClick != null) handle.setOnClickListener { onClick() }
+        handle.setOnTouchListener(object : View.OnTouchListener {
+            private var gesture: OverlayDrag? = null
+            private var footprint: OverlayFootprint? = null
+            private var pointerId = MotionEvent.INVALID_POINTER_ID
+
+            override fun onTouch(view: View, event: MotionEvent): Boolean {
                 val lp = panelParams ?: return false
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        down = ScreenPoint(event.rawX, event.rawY)
-                        origin = ScreenPoint(lp.x.toFloat(), lp.y.toFloat())
-                        dragging = false
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val dx = event.rawX - down.x
-                        val dy = event.rawY - down.y
-                        if (abs(dx) >= threshold || abs(dy) >= threshold) dragging = true
-                        if (dragging) movePanel(ScreenPoint(origin.x + dx, origin.y + dy))
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        if (dragging) {
-                            val size = (snapshot ?: displaySnapshot(this@CalibrationOverlayService)).size
-                            val x = lp.x.toFloat() / (size.width - dp(52)).coerceAtLeast(1)
-                            val y = lp.y.toFloat() / (size.height - dp(52)).coerceAtLeast(1)
-                            overlayPrefs.edit().putFloat("x", x).putFloat("y", y).apply()
-                        } else if (onClick != null) v.performClick()
-                    }
+                val panelView = panel ?: return false
+                val display = snapshot ?: return false
+                if (!panelAttached) return false
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    beforeDrag()
+                    val start = OverlayDrag(ScreenPoint(event.rawX, event.rawY), ScreenPoint(lp.x.toFloat(), lp.y.toFloat()), threshold)
+                    gesture = start
+                    activePanelDrag = start
+                    footprint = OverlayFootprint(display.size, lp.width, lp.height, margin())
+                    pointerId = event.getPointerId(0)
+                    return true
+                }
+                val active = gesture ?: return true
+                if (activePanelDrag !== active) return true
+                val bounds = footprint ?: return true
+                val release = event.actionMasked == MotionEvent.ACTION_UP
+                val stablePointer = event.pointerCount == 1 && event.getPointerId(0) == pointerId && display.size == bounds.display
+                if (stablePointer && (event.actionMasked == MotionEvent.ACTION_MOVE || release)) {
+                    val origin = active.position(ScreenPoint(event.rawX, event.rawY), bounds)
+                    if (origin != null) updatePanelWindow(lp, panelView, bounds.width, bounds.height, origin)
+                    if (!release) return true
+                    activePanelDrag = null
+                    gesture = null
+                    if (origin == null && onClick != null) view.performClick()
+                    finish(origin)
+                } else if (!stablePointer || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    activePanelDrag = null
+                    gesture = null
+                    finish(null)
                 }
                 return true
             }
         })
     }
+
     private fun armPlayback() {
         if (armJob?.isActive == true || testJob?.isActive == true) { PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state="已有播放请求正在执行，请等待或停止"); return }
         val prepared=PlaybackPreparation.pending
+        if (prepared == null && PlaybackPreparation.progress.value.stopped) return
         if (prepared == null || prepared.plan.events.isEmpty() || prepared.plan.events.size != prepared.count || prepared.plan.fatalErrors.isNotEmpty()) {
             PlaybackPreparation.progress.value=PlaybackProgress(state="脚本或播放范围无效，请重新检查",phase=PlaybackStatus.FAILED); return
         }
@@ -298,9 +452,9 @@ class CalibrationOverlayService : Service() {
                 }
                 PlaybackPreparation.progress.value=PlaybackProgress.waitingForGame(prepared.plan)
                 val found=GameWindowWaiter.awaitGame(60_000) { hasFreshGameFocus() }
-                if (!found) { Log.w("DeltaPlayback", "game focus confirmation timed out"); PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state="无法确认游戏窗口：请切回游戏口琴界面并重试",phase=PlaybackStatus.FAILED) }
+                if (!found) { Log.w("DeltaPlayback", "game focus confirmation timed out"); PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state=overlayText(R.string.overlay_window_timeout),phase=PlaybackStatus.FAILED) }
                 else { Log.i("DeltaPlayback", "game window confirmed"); nextFrame(); nextFrame(); startPlayback(input) }
-            } catch (_: CancellationException) { PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state=if(destroyed) "校准服务已停止，请重新启动" else "已取消等待，未发送触摸",phase=if(destroyed) PlaybackStatus.FAILED else PlaybackStatus.COMPLETED) }
+            } catch (_: CancellationException) { PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state=if(destroyed) "校准服务已停止，请重新启动" else overlayText(R.string.overlay_wait_cancelled),phase=if(destroyed) PlaybackStatus.FAILED else PlaybackStatus.COMPLETED, stopped = !destroyed) }
             catch (e: Exception) { rejectPendingStart("准备演奏失败：${e.localizedMessage}") }
             finally {
                 PlaybackPreparation.cancelPendingStart = null
@@ -325,215 +479,381 @@ class CalibrationOverlayService : Service() {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.LEFT }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
     private fun showPanel() {
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(6),dp(4),dp(6),dp(4)); setBackgroundColor(0xee202830.toInt()) }
-        val dragHandle = object : TextView(this) {
-            override fun performClick(): Boolean = super.performClick()
-        }.apply {
-            text = "拖动面板"
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            setPadding(0, dp(4), 0, dp(4))
-        }
-        box.addView(dragHandle)
-        status = TextView(this).apply { setTextColor(Color.WHITE); textSize = 12f; text = "等待横屏" }
-        box.addView(status)
-        serviceStatus = TextView(this).apply { setTextColor(Color.WHITE); textSize = 11f }
-        targetInfo = TextView(this).apply { setTextColor(Color.WHITE); textSize = 11f }
-        box.addView(serviceStatus); box.addView(targetInfo)
-        val targets = layout?.targets.orEmpty()
-        val chooser = Spinner(this).apply {
-            adapter = ArrayAdapter(this@CalibrationOverlayService, android.R.layout.simple_spinner_dropdown_item, targets.map { it.label })
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onNothingSelected(parent: AdapterView<*>?) { selected = null; updateTargetInfo() }
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    selected = targets.getOrNull(position)?.id; updateTargetInfo()
-                }
-            }
-        }
-        box.addView(chooser)
-        updateServiceStatus()
-        val row = LinearLayout(this)
-        fun button(label: String, action: () -> Unit): Button = Button(this).apply {
-            text = label; textSize = 10f; setPadding(0,0,0,0); setOnClickListener { action() }
-            row.addView(this, LinearLayout.LayoutParams(dp(58), dp(42)))
-        }
-        button("保存") { save() }
-        button("测试点击") { testClick() }
-        toggle = button("隐藏") { if (saving) return@button; shown = !shown; toggle.text = if (shown) "隐藏" else "恢复"; refreshMarkers() }
-        button("重校准") { if (!saving) recalibrate() }
-        button("退出") { if (saving) return@button; if (dirty) Toast.makeText(this, "未保存的更改已放弃", Toast.LENGTH_SHORT).show(); stopSelf() }
-        box.addView(row)
-        val noteRow = LinearLayout(this)
-        fun noteButton(label: String, action: () -> Unit) {
-            noteRow.addView(Button(this).apply { text = label; textSize = 10f; setPadding(0,0,0,0); setOnClickListener { action() } }, LinearLayout.LayoutParams(dp(58), dp(42)))
-        }
-        noteButton("短按") { testClick(150L, NoteActionType.TAP) }
-        noteButton("长按") { testClick(holdDuration, NoteActionType.HOLD) }
-        noteButton("−250") { holdDuration = (holdDuration - 250).coerceAtLeast(250); durationLabel.text = "长按 ${holdDuration}ms" }
-        noteButton("+250") { holdDuration = (holdDuration + 250).coerceAtMost(2000); durationLabel.text = "长按 ${holdDuration}ms" }
-        durationLabel = TextView(this).apply { text = "长按 ${holdDuration}ms"; setTextColor(Color.WHITE); textSize = 11f }
-        box.addView(noteRow); box.addView(durationLabel)
-        runtimeInfo = TextView(this).apply { setTextColor(Color.WHITE); textSize = 10f }
-        box.addView(runtimeInfo)
-        fun controlRow(items: List<Pair<String, () -> Unit>>) {
-            val row = LinearLayout(this)
-            items.forEach { (label, action) -> row.addView(Button(this).apply {
-                text = label; textSize = 9f; setPadding(0,0,0,0); setOnClickListener { action() }
-            }, LinearLayout.LayoutParams(dp(58), dp(40))) }
-            box.addView(row)
-        }
-        controlRow(listOf("升调" to { requestRegion(Region.HIGH) }, "自然" to { requestRegion(Region.NATURAL) }, "降调" to { requestRegion(Region.LOW) }, "开半音" to { requestSemitone(true) }, "关半音" to { requestSemitone(false) }))
-        controlRow(listOf("同步高" to { confirmRegion(Region.HIGH) }, "同步中" to { confirmRegion(Region.NATURAL) }, "同步低" to { confirmRegion(Region.LOW) }, "半音开" to { confirmSemitone(true) }, "半音关" to { confirmSemitone(false) }))
-        controlRow(listOf("坐标确认" to { if (testJob?.isActive != true && !dirty) { controlsCalibrated = true; PlaybackPreparation.controlsConfirmed=true; status.text = "已确认控制点坐标；请随时按游戏状态重新同步"; updateRuntimeInfo() } else status.text = "先保存布局并等待操作结束" },
-            "状态重置" to { if (testJob?.isActive != true) { runtimeState = runtimeState.reset(); updateRuntimeInfo(); status.text = "游戏状态已设为未知" } }))
-        updateRuntimeInfo()
-        panel = box
-        panelParams = params(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT)
-        dragHandle.setOnTouchListener(object : View.OnTouchListener {
-            private var pointerOrigin = ScreenPoint(0f, 0f)
-            private var panelOrigin = ScreenPoint(0f, 0f)
-            override fun onTouch(view: View, event: MotionEvent): Boolean {
-                val params = panelParams ?: return false
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        pointerOrigin = ScreenPoint(event.rawX, event.rawY)
-                        panelOrigin = ScreenPoint(params.x.toFloat(), params.y.toFloat())
+        val current = displaySnapshot(this)
+        snapshot = current
+        val style = overlayStyle()
+        val editor = GameCalibrationPanel(
+            style,
+            onResize = ::resizeCalibrationPanel,
+            drag = ::attachCalibrationDrag,
+            actions = GameCalibrationPanel.Actions(
+                select = ::selectTarget,
+                nudge = ::nudgeTarget,
+                save = ::save,
+                recalibrate = ::recalibrate,
+                toggleMarkers = {
+                    if (!saving && !calibrationTesting) {
+                        shown = !shown
+                        refreshMarkers()
                     }
-                    MotionEvent.ACTION_MOVE -> movePanel(ScreenPoint(
-                        panelOrigin.x + event.rawX - pointerOrigin.x,
-                        panelOrigin.y + event.rawY - pointerOrigin.y,
-                    ))
-                    MotionEvent.ACTION_UP -> view.performClick()
-                }
-                return true
-            }
-        })
-        wm.addView(box, panelParams); panelAttached = true
+                },
+                confirmCoordinates = ::confirmCoordinates,
+                testTap = { testClick() },
+                testNote = { hold -> if (hold) testClick(holdDuration, NoteActionType.HOLD) else testClick(150L, NoteActionType.TAP) },
+                adjustDuration = {
+                    holdDuration = (holdDuration + it).coerceIn(250L, 2000L)
+                    updateCalibrationPanel()
+                },
+                sendRegion = ::requestRegion,
+                syncRegion = ::confirmRegion,
+                sendSemitone = ::requestSemitone,
+                syncSemitone = ::confirmSemitone,
+                resetState = {
+                    if (!calibrationTesting) {
+                        runtimeState = runtimeState.reset()
+                        setCalibrationNotice(R.string.game_cal_state_reset)
+                    }
+                },
+                close = {
+                    if (!saving && !calibrationTesting) {
+                        if (dirty) Toast.makeText(this, overlayText(R.string.game_cal_discarded), Toast.LENGTH_SHORT).show()
+                        stopSelf()
+                    }
+                },
+            ),
+        )
+        calibrationPanel = editor
+        panel = editor.view
+        selected = selected?.takeIf { id -> layout?.targets.orEmpty().any { it.id == id } }
+            ?: layout?.targets?.firstOrNull()?.id
+        controlsCalibrated = PlaybackPreparation.controlsConfirmed
+        calibrationAnchor = readAnchor(anchorKey("calibration", current.size)) ?: NormalizedPoint(1f, .16f)
+        val width = minOf(editor.collapsedWidth, current.size.width)
+        val height = minOf(editor.collapsedHeight, current.size.height)
+        val origin = calibrationOrigin(current.size, editor, width, height)
+        val lp = params(width, height).apply { x = origin.x.roundToInt(); y = origin.y.roundToInt() }
+        panelParams = lp
+        updateServiceStatus()
+        refreshMarkers()
+        wm.addView(editor.view, lp)
+        panelAttached = true
+        markersNeedOrdering = false
     }
 
-    private fun movePanel(origin: ScreenPoint) {
-        val view = panel ?: return
-        val params = panelParams ?: return
-        val display = snapshot ?: return
-        if (!panelAttached) return
-        val clamped = OverlayGeometry.clampPanelOrigin(origin, display.size, view.width, view.height)
-        val x = clamped.x.roundToInt()
-        val y = clamped.y.roundToInt()
-        if (params.x != x || params.y != y) {
-            params.x = x
-            params.y = y
-            wm.updateViewLayout(view, params)
+    private fun calibrationCapsule(display: ScreenSize, editor: GameCalibrationPanel) =
+        OverlayFootprint(display, editor.collapsedWidth, editor.collapsedHeight, editor.screenMargin)
+
+    private fun calibrationOrigin(display: ScreenSize, editor: GameCalibrationPanel, width: Int, height: Int): ScreenPoint =
+        OverlayFootprint(display, width, height, editor.screenMargin)
+            .originOf(calibrationAnchor ?: NormalizedPoint(1f, .16f), calibrationCapsule(display, editor))
+
+    private fun resizeCalibrationPanel() {
+        val editor = calibrationPanel ?: return
+        val size = snapshot?.size ?: return
+        val lp = panelParams ?: return
+        if (!panelAttached || activePanelDrag != null) return
+        val availableWidth = (size.width - 2 * editor.screenMargin).coerceAtLeast(1)
+        val availableHeight = (size.height - 2 * editor.screenMargin).coerceAtLeast(1)
+        val width = minOf(availableWidth, if (editor.minimized) editor.collapsedWidth else editor.preferredWidth)
+        val collapsedHeight = minOf(availableHeight, editor.collapsedHeight)
+        val height = if (editor.minimized) collapsedHeight else
+            minOf(editor.maxHeight, (availableHeight * .86f).roundToInt().coerceAtLeast(collapsedHeight))
+        updatePanelWindow(lp, editor.view, width, height, calibrationOrigin(size, editor, width, height))
+    }
+
+    private fun attachCalibrationDrag(view: View, onClick: (() -> Unit)?) {
+        attachPanelDrag(view, onClick, margin = { calibrationPanel?.screenMargin ?: 0 }) { release ->
+            val editor = calibrationPanel ?: return@attachPanelDrag
+            val size = snapshot?.size ?: return@attachPanelDrag
+            val lp = panelParams ?: return@attachPanelDrag
+            if (release != null) {
+                val footprint = OverlayFootprint(size, lp.width, lp.height, editor.screenMargin)
+                val anchor = calibrationCapsule(size, editor)
+                    .freeAnchorAt(release, footprint, calibrationAnchor ?: NormalizedPoint(1f, .16f))
+                calibrationAnchor = anchor
+                writeAnchor(anchorKey("calibration", size), anchor)
+            }
+            if (calibrationStylePending) {
+                calibrationStylePending = false
+                editor.updateStyle(overlayStyle())
+            }
+            resizeCalibrationPanel()
+            orderMarkersBelowPanel()
         }
+    }
+
+    private fun acceptCalibrationDisplay(next: DisplaySnapshot) {
+        val before = snapshot
+        val changed = before != null && before != next
+        snapshot = next
+        if (changed) {
+            if (dirty) {
+                shown = false
+                calibrationNotice = overlayText(R.string.game_cal_display_changed)
+            } else if (layout?.let { OverlayGeometry.compatible(it, next.size) } != true) {
+                calibrationNotice = overlayText(R.string.game_cal_display_mismatch)
+            } else {
+                calibrationNotice = ""
+            }
+            if (before?.size?.orientation != next.size.orientation) {
+                calibrationAnchor = readAnchor(anchorKey("calibration", next.size)) ?: calibrationAnchor
+            }
+        }
+        resizeCalibrationPanel()
+        refreshMarkers()
     }
 
     private fun checkDisplay() {
         if (panel == null) return
         val next = displaySnapshot(this)
-        if (testJob?.isActive == true && snapshot != next) {
-            snapshot = next
-            if (playbackRunner != null) playbackRunner?.requestStop() else testJob?.cancel(CancellationException("屏幕环境已改变"))
-            return
-        }
-        if (snapshot != null && snapshot != next && dirty) {
-            shown = false
-            toggle.text = "恢复"
-            status.text = "屏幕变化，未保存坐标暂停；请重新校准"
-        }
-        val previous = snapshot
-        snapshot = next
-        gamePanel?.let {
-            if (next != previous) {
-                val density = resources.displayMetrics.density
-                it.markBounds((next.size.height / density).roundToInt())
-                resizeGamePanel()
+        if (testJob?.isActive == true) {
+            if (snapshot != next) {
+                if (playbackRunner != null) playbackRunner?.requestStop()
+                else testJob?.cancel(CancellationException("屏幕环境已改变"))
             }
             return
         }
-        panelParams?.let { movePanel(ScreenPoint(it.x.toFloat(), it.y.toFloat())) }
-        refreshMarkers()
+        val displayChanged = snapshot != next
+        if (displayChanged) activePanelDrag = null
+        gamePanel?.let { game ->
+            snapshot = next
+            if (displayChanged || next.size != gameDisplay) {
+                cancelGameMotion()
+                if (next.size != gameDisplay) gameAnchor = readPlayerAnchor(next.size, game)
+                gameDisplay = next.size
+                game.markBounds(next.size.height)
+                game.flushPendingRender()
+            }
+            return
+        }
+        if (displayChanged && calibrationStylePending) {
+            calibrationStylePending = false
+            calibrationPanel?.updateStyle(overlayStyle())
+        }
+        acceptCalibrationDisplay(next)
     }
+
     private fun recalibrate() {
+        if (saving || calibrationTesting) return
         val current = snapshot ?: return
         val draft = layout ?: return
         if (!current.supported || current.size.orientation != draft.orientation) {
-            status.text = "请先进入布局对应的横屏全屏界面"; return
-        }
-        controlsCalibrated = false
-        PlaybackPreparation.controlsConfirmed = false
-        layout = draft.copy(referenceDisplay = ReferenceDisplay(current.size.width, current.size.height))
-        dirty = true; shown = true; toggle.text = "隐藏"; refreshMarkers()
-    }
-    private fun refreshMarkers() {
-        removeMarkers()
-        if (gamePanel != null) return
-        val draft = layout ?: return
-        val current = snapshot ?: return
-        if (!current.supported || !OverlayGeometry.compatible(draft, current.size)) {
-            status.text = "方向或屏幕尺寸不匹配；进入横屏后点重校准"
+            setCalibrationNotice(R.string.game_cal_enter_game)
             return
         }
-        if (!shown) { status.text = "标记已隐藏 · 点击恢复"; return }
-        status.text = if (draft.referenceDisplay == null) "尺寸未知，请校准并保存" else "拖动标记 · 点击选择"
+        layout = draft.copy(referenceDisplay = ReferenceDisplay(current.size.width, current.size.height))
+        shown = true
+        markDraft()
+        refreshMarkers()
+    }
+
+    private fun markDraft() {
+        dirty = true
+        controlsCalibrated = false
+        PlaybackPreparation.controlsConfirmed = false
+        calibrationNotice = ""
+        calibrationResult = ""
+    }
+
+    private fun selectTarget(id: String) {
+        if (saving || calibrationTesting || selected == id) return
+        val previous = selected
+        selected = id
+        previous?.let { markers[it]?.let { marker -> highlightMarker(marker.view, false) } }
+        markers[id]?.let { highlightMarker(it.view, true) }
+        calibrationResult = ""
+        updateCalibrationPanel()
+    }
+
+    private fun nudgeTarget(dx: Int, dy: Int) {
+        val current = snapshot ?: return
+        val draft = layout ?: return
+        if (saving || calibrationTesting || !current.supported || !OverlayGeometry.compatible(draft, current.size)
+            || displaySnapshot(this) != current) return
+        val target = draft.targets.firstOrNull { it.id == selected } ?: return
+        moveTarget(target.id, OverlayGeometry.nudgeTarget(target.position, current.size, dx, dy), current.size)
+    }
+
+    private fun moveTarget(id: String, position: NormalizedPoint, size: ScreenSize) {
+        val draft = layout ?: return
+        if (draft.targets.none { it.id == id && it.position != position }) return
+        layout = draft.copy(targets = draft.targets.map { if (it.id == id) it.copy(position = position) else it })
+        markers[id]?.let { placeMarker(it, position, size) }
+        markDraft()
+        updateCalibrationPanel()
+    }
+
+    private fun placeMarker(marker: Marker, position: NormalizedPoint, size: ScreenSize) {
+        val lp = marker.params
         val markerSize = dp(48)
-        draft.targets.forEach { target ->
-            val view = TextView(this).apply {
-                text = target.label; textSize = 10f; gravity = Gravity.CENTER; setTextColor(Color.WHITE)
-                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(if (target.id == selected) 0xcc007bff.toInt() else 0xcc152f40.toInt()); setStroke(dp(2), Color.WHITE) }
-                contentDescription = "校准 ${target.label}"
-            }
-            val point = OverlayGeometry.windowOrigin(target.position, current.size, markerSize)
-            val lp = params(markerSize, markerSize).apply { x = point.x.roundToInt(); y = point.y.roundToInt() }
-            view.setOnTouchListener(object : View.OnTouchListener {
-                var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
-                override fun onTouch(v: View, event: MotionEvent): Boolean {
-                    if (saving) return true
-                    when (event.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> { downX = event.rawX; downY = event.rawY; startX = lp.x; startY = lp.y; selected = target.id; updateTargetInfo(); return true }
-                        MotionEvent.ACTION_MOVE -> {
-                            lp.x = startX + (event.rawX - downX).roundToInt(); lp.y = startY + (event.rawY - downY).roundToInt()
-                            val normalized = OverlayGeometry.pointFromOrigin(ScreenPoint(lp.x.toFloat(), lp.y.toFloat()), current.size, markerSize)
-                            val origin = OverlayGeometry.windowOrigin(normalized, current.size, markerSize)
-                            lp.x = origin.x.roundToInt(); lp.y = origin.y.roundToInt()
-                            wm.updateViewLayout(v, lp)
-                            layout = layout?.let { it.copy(targets = it.targets.map { t -> if (t.id == target.id) t.copy(position = normalized) else t }) }
-                            dirty = true
-                            controlsCalibrated = false
-                            PlaybackPreparation.controlsConfirmed = false
-                            updateRuntimeInfo()
-                            updateTargetInfo()
-                            status.text = "${target.label}  x=%.4f y=%.4f".format(normalized.x, normalized.y)
-                            return true
-                        }
-                        MotionEvent.ACTION_UP -> { val p = layout?.targets?.find { it.id == target.id }?.position; status.text = "${target.label}  x=%.4f y=%.4f".format(p?.x ?: 0f, p?.y ?: 0f); return true }
-                    }
-                    return false
-                }
-            })
-            wm.addView(view, lp); markers.add(view)
-        }
-        // Keep panel controls above markers where their bounds overlap.
-        panel?.let { view ->
-            if (panelAttached) {
-                wm.removeViewImmediate(view); panelAttached = false
-                wm.addView(view, panelParams); panelAttached = true
-            }
+        val origin = OverlayGeometry.windowOrigin(position, size, markerSize)
+        val x = origin.x.roundToInt()
+        val y = origin.y.roundToInt()
+        if (lp.x == x && lp.y == y && lp.width == markerSize) return
+        lp.x = x
+        lp.y = y
+        lp.width = markerSize
+        lp.height = markerSize
+        wm.updateViewLayout(marker.view, lp)
+    }
+
+    private fun highlightMarker(view: TextView, selected: Boolean) {
+        view.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(if (selected) Color.rgb(0, 105, 175) else Color.rgb(21, 47, 64))
+            setStroke(dp(if (selected) 3 else 1), Color.WHITE)
         }
     }
+
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun createMarker(id: String, position: NormalizedPoint, current: DisplaySnapshot): Marker {
+        val view = TextView(this).apply {
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setOnClickListener { selectTarget(id) }
+        }
+        val markerSize = dp(48)
+        val origin = OverlayGeometry.windowOrigin(position, current.size, markerSize)
+        val lp = params(markerSize, markerSize).apply { x = origin.x.roundToInt(); y = origin.y.roundToInt() }
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        view.setOnTouchListener(object : View.OnTouchListener {
+            private var startDisplay: DisplaySnapshot? = null
+            private var downX = 0f
+            private var downY = 0f
+            private var startX = 0f
+            private var startY = 0f
+            private var dragging = false
+
+            override fun onTouch(v: View, event: MotionEvent): Boolean {
+                val liveDisplay = snapshot ?: return true
+                if (saving || calibrationTesting) {
+                    startDisplay = null
+                    return true
+                }
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startDisplay = liveDisplay
+                        downX = event.rawX
+                        downY = event.rawY
+                        val target = layout?.targets?.firstOrNull { it.id == id } ?: return true
+                        val start = OverlayGeometry.windowOrigin(target.position, liveDisplay.size, lp.width)
+                        startX = start.x
+                        startY = start.y
+                        dragging = false
+                        selectTarget(id)
+                    }
+                    MotionEvent.ACTION_MOVE, MotionEvent.ACTION_UP -> {
+                        if (liveDisplay != startDisplay || event.pointerCount != 1) return true
+                        val dx = event.rawX - downX
+                        val dy = event.rawY - downY
+                        if (dx * dx + dy * dy >= touchSlop * touchSlop) dragging = true
+                        if (dragging) {
+                            val target = OverlayGeometry.pointFromOrigin(ScreenPoint(startX + dx, startY + dy), liveDisplay.size, lp.width)
+                            moveTarget(id, target, liveDisplay.size)
+                        }
+                        if (event.actionMasked == MotionEvent.ACTION_UP) {
+                            if (!dragging) v.performClick()
+                            startDisplay = null
+                        }
+                    }
+                    MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> startDisplay = null
+                }
+                return true
+            }
+        })
+        wm.addView(view, lp)
+        markersNeedOrdering = true
+        return Marker(view, lp)
+    }
+
+    private fun refreshMarkers() {
+        val editor = calibrationPanel ?: return
+        val draft = layout ?: return
+        val current = snapshot ?: return
+        val targets = if (current.supported && OverlayGeometry.compatible(draft, current.size)) draft.targets else emptyList()
+        val ids = targets.map { it.id }.toSet()
+        val obsolete = markers.keys.filterNot(ids::contains)
+        obsolete.forEach { id -> markers.remove(id)?.let { wm.removeViewImmediate(it.view) } }
+        targets.forEach { target ->
+            val marker = markers[target.id] ?: if (shown) {
+                createMarker(target.id, target.position, current).also { markers[target.id] = it }
+            } else return@forEach
+            val label = editor.targetLabel(target)
+            marker.view.text = label
+            marker.view.contentDescription = withStudioLocale().getString(R.string.game_cal_target_marker, label)
+            marker.view.visibility = if (shown) View.VISIBLE else View.GONE
+            highlightMarker(marker.view, target.id == selected)
+            placeMarker(marker, target.position, current.size)
+        }
+        orderMarkersBelowPanel()
+        updateCalibrationPanel()
+    }
+
+    private fun orderMarkersBelowPanel() {
+        val view = calibrationPanel?.view ?: return
+        if (!panelAttached || !markersNeedOrdering || activePanelDrag != null) return
+        wm.removeViewImmediate(view)
+        panelAttached = false
+        wm.addView(view, panelParams)
+        panelAttached = true
+        markersNeedOrdering = false
+    }
+
     private fun removeMarkers() {
         while (markers.isNotEmpty()) {
-            val marker = markers.last()
-            wm.removeViewImmediate(marker)
-            markers.removeAt(markers.lastIndex)
+            val (id, marker) = markers.entries.last()
+            wm.removeViewImmediate(marker.view)
+            markers.remove(id)
         }
+        markersNeedOrdering = false
     }
+
     private fun updateServiceStatus() {
-        val app = application as DeltaHarmonicaApp
-        serviceStatus.text = if (app.rootBackend.preferred) "Root：${app.rootBackend.status().message}"
-            else "无障碍：${app.accessibilityBackend.status().message}"
+        calibrationBackendAvailable = if (app.rootBackend.preferred) app.rootBackend.status().available
+            else app.accessibilityBackend.status().available
+        updateCalibrationPanel()
     }
-    private fun updateTargetInfo() {
-        val target = layout?.targets?.find { it.id == selected }
-        targetInfo.text = target?.let { "目标：${it.label}  x=%.4f y=%.4f".format(it.position.x, it.position.y) } ?: "请选择目标"
+
+    private fun updateCalibrationPanel() {
+        val editor = calibrationPanel ?: return
+        val current = snapshot
+        val draft = layout
+        editor.update(GameCalibrationPanel.State(
+            targets = draft?.targets.orEmpty(),
+            selected = selected,
+            display = current?.size,
+            compatible = current?.supported == true && draft?.let { OverlayGeometry.compatible(it, current.size) } == true,
+            draft = dirty,
+            hasReference = draft?.referenceDisplay != null,
+            shown = shown,
+            coordinatesConfirmed = controlsCalibrated,
+            busy = saving || calibrationTesting,
+            duration = holdDuration,
+            runtime = runtimeState,
+            root = app.rootBackend.preferred,
+            backendAvailable = calibrationBackendAvailable,
+            notice = calibrationNotice,
+            result = calibrationResult,
+        ))
+    }
+
+    private fun setCalibrationNotice(id: Int, vararg args: Any) {
+        calibrationNotice = withStudioLocale().getString(id, *args)
+        updateCalibrationPanel()
+    }
+
+    private fun confirmCoordinates() {
+        val current = snapshot ?: return
+        val draft = layout ?: return
+        if (saving || calibrationTesting || dirty || draft.referenceDisplay == null || !current.supported ||
+            !OverlayGeometry.compatible(draft, current.size) || displaySnapshot(this) != current) {
+            setCalibrationNotice(R.string.game_cal_coordinates_needed)
+            return
+        }
+        controlsCalibrated = true
+        PlaybackPreparation.controlsConfirmed = true
+        setCalibrationNotice(R.string.game_cal_coordinates_ack)
     }
     private suspend fun nextFrame() = suspendCancellableCoroutine<Unit> { continuation ->
         val choreographer = Choreographer.getInstance()
@@ -541,69 +861,117 @@ class CalibrationOverlayService : Service() {
         choreographer.postFrameCallback(callback)
         continuation.invokeOnCancellation { choreographer.removeFrameCallback(callback) }
     }
-    private fun updateRuntimeInfo() {
-        fun confidence(s: SyncStatus) = when (s) { SyncStatus.UNKNOWN -> "未知"; SyncStatus.APP_TRACKED -> "已发送待确认"; SyncStatus.USER_CONFIRMED -> "用户确认" }
-        val region = when (runtimeState.pitchRegion) { Region.HIGH -> "升调"; Region.NATURAL -> "自然"; Region.LOW -> "降调"; null -> "未知" }
-        val semitone = when (runtimeState.semitoneEnabled) { true -> "开"; false -> "关"; null -> "未知" }
-        runtimeInfo.text = "音区:$region (${confidence(runtimeState.regionStatus)}) 半音:$semitone (${confidence(runtimeState.semitoneStatus)})\n控制点:${if (controlsCalibrated) "已确认" else "待确认"}"
-    }
     private fun confirmRegion(region: Region) {
-        if (testJob?.isActive == true) { status.text = "操作正在执行"; return }
-        runtimeState = runtimeState.confirmRegion(region); updateRuntimeInfo(); status.text = "已按用户观察同步音区"
+        if (calibrationTesting) {
+            setCalibrationNotice(R.string.game_cal_busy)
+            return
+        }
+        runtimeState = runtimeState.confirmRegion(region)
+        setCalibrationNotice(R.string.game_cal_region_synced)
     }
+
     private fun confirmSemitone(enabled: Boolean) {
-        if (testJob?.isActive == true) { status.text = "操作正在执行"; return }
-        runtimeState = runtimeState.confirmSemitone(enabled); updateRuntimeInfo(); status.text = "已按用户观察同步半音"
+        if (calibrationTesting) {
+            setCalibrationNotice(R.string.game_cal_busy)
+            return
+        }
+        runtimeState = runtimeState.confirmSemitone(enabled)
+        setCalibrationNotice(R.string.game_cal_semitone_synced)
     }
+
     private fun requestRegion(region: Region) {
-        if (testJob?.isActive == true) { status.text = "操作正在执行"; return }
-        if (!controlsCalibrated) { status.text = "请先确认控制点已对准并保存"; return }
-        if (runtimeState.planRegion(region) == ControlDecision.SKIP) { status.text = "音区相同，已跳过；请确认游戏状态"; return }
-        testClick(targetOverride = "REGION_${region.name}", onControlResult = { result ->
-            runtimeState = runtimeState.regionResult(region, result); updateRuntimeInfo()
-            if (result == TapResult.Completed) status.text = "音区 ${region.name} 已发送，等待确认游戏状态"
-            else status.text = "音区切换未确认，请重新同步：$result"
-        })
+        if (calibrationTesting) {
+            setCalibrationNotice(R.string.game_cal_busy)
+            return
+        }
+        if (!controlsCalibrated) {
+            setCalibrationNotice(R.string.game_cal_coordinates_needed)
+            return
+        }
+        if (runtimeState.planRegion(region) == ControlDecision.SKIP) {
+            setCalibrationNotice(R.string.game_cal_region_skip)
+            return
+        }
+        testClick(targetOverride = "REGION_${region.name}") { result ->
+            runtimeState = runtimeState.regionResult(region, result)
+            setCalibrationNotice(if (result == TapResult.Completed) R.string.game_cal_region_sent else R.string.game_cal_control_failed)
+        }
     }
+
     private fun requestSemitone(next: Boolean) {
-        if (testJob?.isActive == true) { status.text = "操作正在执行"; return }
+        if (calibrationTesting) {
+            setCalibrationNotice(R.string.game_cal_busy)
+            return
+        }
         when (runtimeState.planSemitone(next)) {
-            ControlDecision.NEEDS_SYNC -> { status.text = "半音未知，请先按游戏显示同步开或关"; return }
-            ControlDecision.SKIP -> { status.text = "半音状态相同，已跳过；请确认游戏状态"; return }
+            ControlDecision.NEEDS_SYNC -> {
+                setCalibrationNotice(R.string.game_cal_semitone_need_sync)
+                return
+            }
+            ControlDecision.SKIP -> {
+                setCalibrationNotice(R.string.game_cal_semitone_skip)
+                return
+            }
             ControlDecision.SEND -> Unit
         }
-        if (!controlsCalibrated) { status.text = "请先确认控制点已对准并保存"; return }
-        testClick(targetOverride = "SEMITONE_TOGGLE", onControlResult = { result ->
-            runtimeState = runtimeState.semitoneResult(next, result); updateRuntimeInfo()
-            if (result == TapResult.Completed) status.text = "半音切换已发送，等待确认游戏状态"
-            else status.text = "半音状态未知，请重新同步：$result"
-        })
+        if (!controlsCalibrated) {
+            setCalibrationNotice(R.string.game_cal_coordinates_needed)
+            return
+        }
+        testClick(targetOverride = "SEMITONE_TOGGLE") { result ->
+            runtimeState = runtimeState.semitoneResult(next, result)
+            setCalibrationNotice(if (result == TapResult.Completed) R.string.game_cal_semitone_sent else R.string.game_cal_control_failed)
+        }
     }
+
     private fun testClick(durationMs: Long? = null, actionType: NoteActionType = NoteActionType.TAP,
         targetOverride: String? = null, onControlResult: ((TapResult) -> Unit)? = null) {
-        if (saving || testJob?.isActive == true) { status.text = "正在执行，请稍候"; return }
+        if (saving || testJob?.isActive == true) {
+            setCalibrationNotice(R.string.game_cal_busy)
+            return
+        }
         val draft = layout ?: return
         val before = snapshot ?: return
-        val targetId = targetOverride ?: selected ?: run { status.text = "请选择目标"; return }
-        if (dirty) { status.text = "请先保存校准，再测试"; return }
+        val targetId = targetOverride ?: selected ?: run {
+            setCalibrationNotice(R.string.game_cal_choose_target)
+            return
+        }
+        if (dirty) {
+            setCalibrationNotice(R.string.game_cal_save_before_test)
+            return
+        }
         val chosen = draft.targets.find { it.id == targetId }
-        if (chosen == null) { status.text = "目标不存在"; return }
-        if (durationMs != null && chosen.type != TargetType.NOTE) { status.text = "请选择音键；控制目标请使用测试点击"; return }
+        if (chosen == null) {
+            setCalibrationNotice(R.string.game_cal_target_missing)
+            return
+        }
+        if (durationMs != null && chosen.type != TargetType.NOTE) {
+            setCalibrationNotice(R.string.game_cal_note_required)
+            return
+        }
         val app = application as DeltaHarmonicaApp
         val backend = app.accessibilityBackend
         val root = app.rootBackend
         updateServiceStatus()
-        if (root.releaseUncertain) { status.text = "上次 Root 触摸释放待确认，请先检查游戏"; return }
-        if (!root.preferred && !backend.status().available) { status.text = backend.status().message; return }
+        if (root.releaseUncertain) {
+            setCalibrationNotice(R.string.game_cal_root_release)
+            return
+        }
+        if (!root.preferred && !backend.status().available) {
+            setCalibrationNotice(R.string.game_cal_input_needed)
+            return
+        }
         if (!before.supported || displaySnapshot(this) != before || draft.referenceDisplay == null || !OverlayGeometry.compatible(draft, before.size)) {
-            status.text = "布局未校准或显示环境不匹配，请重新校准"; return
+            setCalibrationNotice(R.string.game_cal_layout_required)
+            return
         }
-        if (onControlResult == null && durationMs == null && chosen.type != TargetType.NOTE) {
-            runtimeState = runtimeState.reset(); updateRuntimeInfo()
-            status.text = "手动测试控制键，游戏状态已设为未知"
-        }
+        val manualControl = onControlResult == null && durationMs == null && chosen.type != TargetType.NOTE
+        if (manualControl) runtimeState = runtimeState.reset()
         val panelView = panel ?: return
         val originalShown = shown
+        calibrationTesting = true
+        calibrationResult = ""
+        setCalibrationNotice(R.string.game_cal_busy)
         testJob = scope.launch(start = CoroutineStart.LAZY) {
             var result: TapResult? = null
             var touch: RootGestureConnection? = null
@@ -617,6 +985,8 @@ class CalibrationOverlayService : Service() {
                     hide = {
                         testState = OverlayTestState.HIDING_OVERLAYS
                         removeMarkers()
+                        cancelGameMotion()
+                        activePanelDrag = null
                         if (panelAttached) { wm.removeViewImmediate(panelView); panelAttached = false }
                     },
                     awaitWindows = { nextFrame(); nextFrame() },
@@ -628,10 +998,11 @@ class CalibrationOverlayService : Service() {
                         if (rootTouch != null) rootTouch.play(
                             CombinedGesture.create(point, durationMs ?: 60L, emptyList()),
                             stop = { destroyed || displaySnapshot(this@CalibrationOverlayService) != before },
-                        ) else if (durationMs == null) backend.tap(point) else {
-                            val action = NoteAction(targetId, point, actionType, durationMs, android.os.SystemClock.elapsedRealtime(), NoteActionState.DISPATCHING)
+                        ) else {
+                            val action = NoteAction(targetId, point, actionType, durationMs ?: 60L,
+                                android.os.SystemClock.elapsedRealtime(), NoteActionState.DISPATCHING)
                             currentAction = action
-                            val outcome = backend.perform(action)
+                            val outcome = backend.perform(action, expectedPackage = FocusedWindow.GAME_PACKAGE)
                             currentAction = action.copy(state = when (outcome) {
                                 TapResult.Completed -> NoteActionState.COMPLETED
                                 TapResult.Cancelled -> NoteActionState.CANCELLED
@@ -650,36 +1021,42 @@ class CalibrationOverlayService : Service() {
                     restore = {
                         testState = OverlayTestState.RESTORING_OVERLAYS
                         if (!destroyed) {
-                            if (!panelAttached) { wm.addView(panelView, panelParams); panelAttached = true }
                             shown = originalShown
-                            snapshot = displaySnapshot(this@CalibrationOverlayService)
-                            refreshMarkers()
+                            acceptCalibrationDisplay(displaySnapshot(this@CalibrationOverlayService))
+                            if (!panelAttached) {
+                                wm.addView(panelView, panelParams)
+                                panelAttached = true
+                                markersNeedOrdering = false
+                            }
+                            resizeCalibrationPanel()
                         }
                     })
             } catch (_: CancellationException) {
                 result = TapResult.Cancelled
             } catch (e: Exception) {
                 result = TapResult.Unavailable("恢复悬浮层失败：${e.localizedMessage}")
-                Toast.makeText(this@CalibrationOverlayService, result.reason, Toast.LENGTH_LONG).show()
+                Log.w("DeltaCalibration", "Test gesture or overlay restoration failed", e)
             } finally {
                 touch?.let { root.closeTouch(it) }
+                calibrationTesting = false
                 if (!destroyed && panelAttached) {
+                    val live = displaySnapshot(this@CalibrationOverlayService)
+                    if (live != snapshot) acceptCalibrationDisplay(live)
                     testState = when (result) {
                         TapResult.Completed -> OverlayTestState.GESTURE_COMPLETED
                         TapResult.Cancelled -> OverlayTestState.GESTURE_CANCELLED
                         else -> OverlayTestState.FAILED
                     }
-                    status.text = when (val outcome = result) {
-                        TapResult.Completed -> "系统已完成触摸手势，请确认游戏按键是否响应。悬浮层已恢复"
-                        TapResult.Cancelled -> "手势取消或屏幕变化；释放状态请检查；悬浮层已恢复"
-                        TapResult.TimedOut -> "手势超时，释放状态未确认；悬浮层已恢复"
-                        TapResult.Rejected -> "系统拒绝手势；悬浮层已恢复"
-                        TapResult.Busy -> "无障碍手势正忙；悬浮层已恢复"
-                        is TapResult.Unavailable -> "${outcome.reason}；请检查悬浮层状态"
-                        is TapResult.InvalidPoint -> "${outcome.reason}；悬浮层已恢复"
-                        null -> "测试未完成；请检查悬浮层状态"
-                    }
-                    updateServiceStatus(); updateTargetInfo()
+                    calibrationResult = overlayText(when (result) {
+                        TapResult.Completed -> R.string.game_cal_test_completed
+                        TapResult.Cancelled -> R.string.game_cal_test_cancelled
+                        TapResult.TimedOut -> R.string.game_cal_test_timeout
+                        TapResult.Rejected -> R.string.game_cal_test_rejected
+                        TapResult.Busy -> R.string.game_cal_test_busy
+                        else -> R.string.game_cal_test_incomplete
+                    })
+                    calibrationNotice = if (manualControl) overlayText(R.string.game_cal_manual_control) else ""
+                    updateServiceStatus()
                     onControlResult?.invoke(result ?: TapResult.Unavailable("未完成"))
                 }
             }
@@ -687,7 +1064,7 @@ class CalibrationOverlayService : Service() {
         testJob?.start()
     }
     private fun startPlayback(input: PlaybackInput) {
-        fun reject(message: String) { Log.w("DeltaPlayback", "preflight rejected: $message"); status.text=message; PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state=message,phase=PlaybackStatus.FAILED) }
+        fun reject(message: String) { Log.w("DeltaPlayback", "preflight rejected: $message"); PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state=message,phase=PlaybackStatus.FAILED) }
         if (saving || dirty || testJob?.isActive == true) { reject("请保存布局并等待当前操作结束"); return }
         val prepared = PlaybackPreparation.pending ?: run { reject("请重新选择曲目并开始"); return }
         val draft = layout ?: run { reject("布局不可用，请重新打开校准"); return }
@@ -713,12 +1090,53 @@ class CalibrationOverlayService : Service() {
         val originalShown = shown
         val runner = PlaybackRunner(); playbackRunner = runner; PlaybackPreparation.activeRunner = runner
         Log.i("DeltaPlayback", "session start count=${fresh.events.size} combined=${fresh.combined}")
-        PlaybackPreparation.progress.value = PlaybackProgress(fresh.events.size,0,null,"正在隐藏悬浮层",PlaybackStatus.CHECKING)
+        PlaybackPreparation.progress.value = PlaybackProgress(fresh.events.size, state = "正在隐藏悬浮层",
+            phase = PlaybackStatus.CHECKING, durationMs = fresh.estimatedTotalMs)
         PlaybackPreparation.actualTimings.clear()
         PlaybackPreparation.pending = null
         testJob = scope.launch(start = CoroutineStart.LAZY) {
             var outcome: PlaybackResult? = null
             var sessionStartMs=0L
+            var clockJob: Job? = null
+            var sessionBar: GameSessionBar? = null
+            var sessionParams: WindowManager.LayoutParams? = null
+            var compactOrigin: ScreenPoint? = null
+            var expandedOrigin: ScreenPoint? = null
+            var accessibilityGestureActive = false
+            var resumingControls = false
+            val screenTargets = OverlayGeometry.protectedTouchPoints(draft.targets.map { Coordinates.toScreen(it.position, before.size) })
+
+            fun updateSessionBar() {
+                sessionBar?.update(PlaybackPreparation.progress.value,
+                    canExpand = expandedOrigin != null && !resumingControls,
+                    canPause = !accessibilityGestureActive && !resumingControls)
+            }
+
+            fun resizeSessionBar(expand: Boolean) {
+                val bar = sessionBar ?: return
+                val lp = sessionParams ?: return
+                val origin = (if (expand) expandedOrigin else compactOrigin) ?: return
+                lp.width = if (expand) bar.expandedWidth else bar.compactWidth
+                lp.height = if (expand) bar.expandedHeight else bar.compactHeight
+                lp.x = origin.x.toInt()
+                lp.y = origin.y.toInt()
+                bar.setExpanded(expand)
+                wm.updateViewLayout(bar.view, lp)
+                updateSessionBar()
+            }
+
+            suspend fun verifySessionWindow() {
+                nextFrame()
+                nextFrame()
+                val controls = stopView ?: error("演奏控制窗口不可用")
+                check(controls.width > 0 && controls.height > 0) { "演奏控制窗口不可用" }
+                val location = IntArray(2)
+                controls.getLocationOnScreen(location)
+                check(screenTargets.none { point ->
+                    point.x >= location[0] && point.x < location[0] + controls.width &&
+                        point.y >= location[1] && point.y < location[1] + controls.height
+                }) { "演奏控制窗口覆盖目标，请调整校准位置" }
+            }
             var currentSourceIndex: Int? = null
             var overlayRestored=false
             var touch: RootGestureConnection? = null
@@ -761,28 +1179,41 @@ class CalibrationOverlayService : Service() {
                     }
                     if (touch == null) Log.w("DeltaRoot", "startup fallback to accessibility before touch")
                 }
-                Log.i("DeltaPlayback", "input backend=${if (touch != null) PlaybackInput.ROOT else PlaybackInput.ACCESSIBILITY} speed=${prepared.speed}")
+                val actualInput = if (touch != null) PlaybackInput.ROOT else PlaybackInput.ACCESSIBILITY
+                PlaybackPreparation.activeInput = actualInput
+                Log.i("DeltaPlayback", "input backend=$actualInput speed=${prepared.speed}")
                 outcome = runner.run(fresh,
                     hide = {
                         removeMarkers()
+                        cancelGameMotion()
+                        activePanelDrag = null
                         if (panelAttached) { wm.removeViewImmediate(panelView); panelAttached = false }
-                        val stop = overlayStyle().button("停止", primary = true) { PlaybackPreparation.stopPlayback() }.apply {
-                            setOnClickListener { if (PlaybackPreparation.stopPlayback()) { text = "等待释放"; isEnabled = false } }
-                        }
-                        wm.addView(stop,params(dp(90),dp(48)).apply { x = (before.size.width-dp(90)).coerceAtLeast(0); y=0 })
-                        stopView = stop
+                        val bar = GameSessionBar(overlayStyle(), app.model.midiWorkspace.name,
+                            onTogglePause = {
+                                if (!accessibilityGestureActive && !resumingControls && PlaybackPreparation.togglePause()) {
+                                    updateSessionBar()
+                                }
+                            }, onStop = {
+                                if (PlaybackPreparation.stopPlayback()) updateSessionBar()
+                            }, onToggleDetails = {
+                                val current = sessionBar
+                                if (current != null && !resumingControls &&
+                                    PlaybackPreparation.progress.value.phase == PlaybackStatus.PAUSED) {
+                                    resizeSessionBar(!current.expanded)
+                                }
+                            })
+                        val origin = OverlayGeometry.controlBarOrigin(before.size, bar.compactWidth, bar.compactHeight, screenTargets)
+                            ?: error("演奏控制窗口覆盖目标，请调整校准位置")
+                        compactOrigin = origin
+                        expandedOrigin = OverlayGeometry.controlBarOrigin(before.size, bar.expandedWidth, bar.expandedHeight, screenTargets)
+                        val lp = params(bar.compactWidth, bar.compactHeight).apply { x = origin.x.toInt(); y = origin.y.toInt() }
+                        wm.addView(bar.view, lp)
+                        stopView = bar.view
+                        sessionBar = bar
+                        sessionParams = lp
+                        updateSessionBar()
                     },
-                    awaitWindows = {
-                        nextFrame(); nextFrame()
-                        val stop = stopView ?: error("停止窗口不可用")
-                        val location = IntArray(2); stop.getLocationOnScreen(location)
-                        val ids = fresh.events.flatMap { e -> listOf(e.event.noteKeyId) + (if(e.regionSwitch) listOf("REGION_${e.event.pitchRegion.name}") else emptyList()) + (if(e.semitoneSwitch) listOf("SEMITONE_TOGGLE") else emptyList()) }.toSet()
-                        val overlaps = draft.targets.filter { it.id in ids }.any { target ->
-                            val point = Coordinates.toScreen(target.position,before.size)
-                            point.x >= location[0] && point.x < location[0]+stop.width && point.y >= location[1] && point.y < location[1]+stop.height
-                        }
-                        check(!overlaps) { "停止窗口覆盖目标，请调整校准位置" }
-                    },
+                    awaitWindows = ::verifySessionWindow,
                     valid = ::environmentValid,
                     dispatch = { targetId, duration ->
                         val target = draft.targets.find { it.id == targetId }
@@ -793,7 +1224,7 @@ class CalibrationOverlayService : Service() {
                             val connection = touch
                             val result = if (connection != null)
                                 playRoot(connection, CombinedGesture.create(action.point, duration, emptyList()), index.takeIf { target.type == TargetType.NOTE }, duration)
-                            else backend.perform(action,{ dispatched=it },{ callback=it })
+                            else backend.perform(action, { dispatched = it }, { callback = it }, FocusedWindow.GAME_PACKAGE)
                             if(target.type == TargetType.NOTE && index != null && dispatched != null)
                                 PlaybackPreparation.actualTimings[index]=ActualTiming(dispatched!!-sessionStartMs,callback?.minus(sessionStartMs),0,duration,timingResult(result))
                             if (targetId.startsWith("REGION_")) runtimeState = runtimeState.regionResult(Region.valueOf(targetId.removePrefix("REGION_")),result)
@@ -810,9 +1241,21 @@ class CalibrationOverlayService : Service() {
                             stopView?.let { view ->
                                 try { wm.removeViewImmediate(view); stopView=null } catch(e: Exception) { restoreFailure=e }
                             }
+                            sessionBar = null
+                            sessionParams = null
                             if (!destroyed) try {
                                 if (!panelAttached) { wm.addView(panelView,panelParams); panelAttached = true }
-                                shown = originalShown; snapshot = displaySnapshot(this@CalibrationOverlayService); refreshMarkers()
+                                shown = originalShown
+                                val restoredDisplay = displaySnapshot(this@CalibrationOverlayService)
+                                snapshot = restoredDisplay
+                                gamePanel?.let {
+                                    if (gameDisplay != restoredDisplay.size) {
+                                        gameDisplay = restoredDisplay.size
+                                        gameAnchor = readPlayerAnchor(restoredDisplay.size, it)
+                                    }
+                                    it.markBounds(restoredDisplay.size.height)
+                                }
+                                refreshMarkers()
                             } catch(e: Exception) {
                                 if(restoreFailure == null) restoreFailure=e else restoreFailure!!.addSuppressed(e)
                             }
@@ -827,14 +1270,44 @@ class CalibrationOverlayService : Service() {
                             PlaybackPhase.RESTORED -> "悬浮层已恢复"
                             else -> null
                         }
-                        if (description != null) PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state=description)
+                        if (phase == PlaybackPhase.WAITING_FOR_GESTURE) accessibilityGestureActive = touch == null
+                        if (phase == PlaybackPhase.GESTURE_FINISHED) accessibilityGestureActive = false
+                        if (phase == PlaybackPhase.RESUMED) resumingControls = false
+                        val current = PlaybackPreparation.progress.value
+                        if (current.phase != PlaybackStatus.STOPPING) when (phase) {
+                            PlaybackPhase.PAUSED -> PlaybackPreparation.progress.value =
+                                current.copy(phase = PlaybackStatus.PAUSED, elapsedMs = runner.elapsedMs())
+                            PlaybackPhase.RESUMED -> PlaybackPreparation.progress.value =
+                                current.copy(phase = PlaybackStatus.PLAYING)
+                            else -> if (description != null) {
+                                PlaybackPreparation.progress.value = current.copy(state = description)
+                            }
+                        }
+                        updateSessionBar()
                     }, dryRunCompleted=true, warningsConfirmed=prepared.warningsConfirmed,
-                    onSessionStarted = { sessionStartMs=it },
+                    onSessionStarted = {
+                        sessionStartMs = it
+                        clockJob = scope.launch {
+                            while (isActive) {
+                                val current = PlaybackPreparation.progress.value
+                                if (current.phase in setOf(PlaybackStatus.PLAYING, PlaybackStatus.PAUSING)) {
+                                    PlaybackPreparation.progress.value = current.copy(elapsedMs = runner.elapsedMs())
+                                }
+                                updateSessionBar()
+                                delay(200)
+                            }
+                        }
+                    },
                     onEvent = { completed, key, finished ->
                         if (!finished) currentSourceIndex=fresh.events.getOrNull(completed)?.sourceIndex
-                        val stopping=PlaybackPreparation.progress.value.phase == PlaybackStatus.STOPPING
-                        PlaybackPreparation.progress.value = PlaybackProgress(fresh.events.size,completed,key,if(stopping) "停止已请求，当前手势已结束" else if(finished) "手势完成" else "准备音符",if(stopping) PlaybackStatus.STOPPING else PlaybackStatus.PLAYING)
-                        (stopView as? Button)?.let { if (it.isEnabled) it.text = "停止 $completed/${fresh.events.size}" }
+                        val current = PlaybackPreparation.progress.value
+                        val phase = when (current.phase) {
+                            PlaybackStatus.STOPPING, PlaybackStatus.PAUSING, PlaybackStatus.PAUSED -> current.phase
+                            else -> PlaybackStatus.PLAYING
+                        }
+                        PlaybackPreparation.progress.value = current.copy(completed = completed, current = key,
+                            elapsedMs = runner.elapsedMs(), phase = phase)
+                        updateSessionBar()
                     }, dispatchCombined = { item, duration ->
                         val ids=buildList {
                             if (item.regionSwitch) add("REGION_${item.event.pitchRegion.name}")
@@ -847,17 +1320,22 @@ class CalibrationOverlayService : Service() {
                             val gesture = CombinedGesture.create(Coordinates.toScreen(note.position,before.size),duration,controls,leadMs=fresh.combinedLeadMs)
                             val connection = touch
                             if (connection != null) playRoot(connection, gesture, item.sourceIndex, duration)
-                            else backend.performCombined(gesture,{ dispatched=it },{ callback=it })
+                            else backend.performCombined(gesture, { dispatched = it }, { callback = it }, FocusedWindow.GAME_PACKAGE)
                         } catch (e: IllegalArgumentException) { TapResult.Unavailable("组合目标重合或时长无效") }
                         if(dispatched != null)
                             PlaybackPreparation.actualTimings[item.sourceIndex]=ActualTiming(dispatched!!-sessionStartMs,callback?.minus(sessionStartMs),if(controls.isEmpty()) 0 else fresh.combinedLeadMs,duration,timingResult(result))
                         if (item.regionSwitch) runtimeState=runtimeState.regionResult(item.event.pitchRegion,result)
                         if (item.semitoneSwitch) runtimeState=runtimeState.semitoneResult(item.event.semitoneEnabled,result)
                         result
+                    }, onResuming = {
+                        resumingControls = true
+                        if (sessionBar?.expanded == true) resizeSessionBar(false) else updateSessionBar()
+                        verifySessionWindow()
                     })
             } catch (e: CancellationException) { runtimeState = runtimeState.reset() }
             catch (e: Exception) { runtimeState = runtimeState.reset(); if (!destroyed) Toast.makeText(this@CalibrationOverlayService,"播放或恢复失败：${e.localizedMessage}",Toast.LENGTH_LONG).show() }
             finally {
+                clockJob?.cancel()
                 val cleanup = touch?.let { root.closeTouch(it) }
                 if (cleanup == RootCleanup.OBSERVED_IDLE) {
                     outcome = outcome?.copy(failure = "游戏触摸中断，Android 输入队列已清理")
@@ -866,50 +1344,61 @@ class CalibrationOverlayService : Service() {
                 }
                 playbackRunner = null
                 focusJob?.cancel(); focusJob=null; focusPackage=null
+                PlaybackPreparation.activeInput = null
                 PlaybackPreparation.activeRunner = null
-                Log.i("DeltaPlayback", "session result completed=${outcome?.completed} remaining=${outcome?.remaining} stopped=${outcome?.stopped} elapsedMs=${outcome?.elapsedMs} failure=${outcome?.failure}")
-                PlaybackPreparation.progress.value = PlaybackPreparation.progress.value.copy(phase=if(outcome == null || outcome?.failure != null) PlaybackStatus.FAILED else PlaybackStatus.COMPLETED, state = when {
-                    outcome == null -> "播放中断，检查游戏与悬浮层"
+                Log.i("DeltaPlayback", "session result completed=${outcome?.completed} remaining=${outcome?.remaining} stopped=${outcome?.stopped} elapsedMs=${outcome?.elapsedMs} maxLatenessMs=${outcome?.maxLatenessMs} failure=${outcome?.failure}")
+                PlaybackPreparation.progress.value = PlaybackPreparation.progress.value.copy(phase=if(outcome == null || outcome?.failure != null) PlaybackStatus.FAILED else PlaybackStatus.COMPLETED,
+                    elapsedMs = outcome?.elapsedMs ?: runner.elapsedMs(), stopped = outcome?.stopped == true, state = when {
+                    outcome == null -> overlayText(R.string.overlay_interrupted)
                     outcome?.failure != null -> "失败：${outcome?.failure}"
-                    outcome?.stopped == true -> if (!destroyed && panelAttached) "已停止，悬浮层已恢复" else "已停止，请检查悬浮层"
-                    else -> if (!destroyed && panelAttached) "已完成，悬浮层已恢复" else "已完成，请检查悬浮层"
+                    outcome?.stopped == true -> overlayText(
+                        if (!destroyed && panelAttached) R.string.overlay_stopped_restored else R.string.overlay_stopped_check,
+                    )
+                    else -> overlayText(
+                        if (!destroyed && panelAttached) R.string.overlay_completed_restored else R.string.overlay_completed_check,
+                    )
                 })
-                if (!destroyed && panelAttached) {
-                    val r = outcome
-                    if (r?.failure != null) runtimeState = runtimeState.reset()
-                    if (gamePanel == null) updateRuntimeInfo()
-                    val measuredDelay=fresh.events.mapNotNull { item ->
-                        PlaybackPreparation.actualTimings[item.sourceIndex]?.let { (it.dispatchMs+it.noteOffsetMs-item.requestedStartMs).coerceAtLeast(0) }
-                    }.maxOrNull()
-                    status.text = if (r == null) "播放未完成；请检查悬浮层和游戏状态" else
-                        "系统完成 ${r.completed}，未执行 ${r.remaining}；音区 ${r.regionSwitches} 次，半音 ${r.semitoneSwitches} 次；会话 ${r.elapsedMs}ms；请求相对原曲最大偏差 ${measuredDelay?.let { "$it ms" } ?: "无记录"}，相对已拉伸计划最大额外延迟 ${r.maxLatenessMs} ms；${r.failure ?: if(r.stopped) "已停止" else "已结束"}；悬浮层已恢复。游戏响应需确认"
-                }
             }
         }
         testJob?.start()
     }
     private fun save() {
-        if (saving) return
+        if (saving || calibrationTesting) return
         val current = snapshot ?: return
         val draft = layout ?: return
         if (!current.supported || !OverlayGeometry.compatible(draft, current.size) || displaySnapshot(this) != current) {
-            status.text = "屏幕不匹配，请重新校准"; return
+            setCalibrationNotice(R.string.game_cal_display_mismatch)
+            return
         }
         saving = true
-        val saved = draft.copy(referenceDisplay = ReferenceDisplay(current.size.width, current.size.height), updatedAt = maxOf(System.currentTimeMillis(), draft.createdAt))
+        setCalibrationNotice(R.string.game_cal_busy)
+        val saved = draft.copy(referenceDisplay = ReferenceDisplay(current.size.width, current.size.height),
+            updatedAt = maxOf(System.currentTimeMillis(), draft.createdAt))
         scope.launch {
             try {
-                (application as DeltaHarmonicaApp).layouts.save(saved)
-                layout = saved; attachedLayout = saved; dirty = false; status.text = "已保存 · ${saved.targets.size} 个目标"
-            } catch (e: Exception) { status.text = "保存失败：${e.localizedMessage}" }
-            finally { saving = false }
+                app.layouts.save(saved)
+                layout = saved
+                attachedLayout = saved
+                dirty = false
+                setCalibrationNotice(R.string.game_cal_saved, saved.targets.size)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("DeltaCalibration", "Could not save game layout", e)
+                setCalibrationNotice(R.string.game_cal_save_error)
+            } finally {
+                saving = false
+                updateCalibrationPanel()
+            }
         }
     }
+
     override fun onDestroy() {
         if (armJob?.isActive == true || testJob?.isActive == true) {
             Log.w("DeltaPlayback", "overlay service destroyed during session")
             PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state="校准服务已停止，请重新启动后检查游戏状态",phase=PlaybackStatus.FAILED)
         }
+        cancelGameMotion()
         destroyed = true; PlaybackPreparation.cancelPendingStart=null; playbackRunner?.requestStop(); focusJob?.cancel(); focusJob=null; focusPackage=null; stopView?.let { runCatching { wm.removeViewImmediate(it) } }; stopView=null; displayManager.unregisterDisplayListener(listener); scope.cancel(); runCatching { removeMarkers() }
         panel?.let { if (panelAttached) runCatching { wm.removeViewImmediate(it) } }; panelAttached = false; panel = null
         gamePanel?.dispose()
