@@ -100,9 +100,7 @@ class CalibrationOverlayService : Service() {
     private var testJob: Job? = null
     private var armJob: Job? = null
     private var focusJob: Job? = null
-    @Volatile private var focusPackage: String? = null
-    @Volatile private var focusedWindow: FocusedWindow.Identity? = null
-    @Volatile private var focusObservedAt: Long = 0
+    @Volatile private var focusObservation = FocusedWindow.Observation()
     private var playbackRunner: PlaybackRunner? = null
     private var stopView: View? = null
     private var destroyed = false
@@ -471,14 +469,21 @@ class CalibrationOverlayService : Service() {
                     return@launch
                 }
                 Log.i("DeltaPlayback", "preflight backend=$input requestedRoot=$preferRoot")
-                focusPackage=null; focusObservedAt=0
-                focusedWindow = null
-                focusJob=scope.launch {
+                focusObservation = FocusedWindow.Observation()
+                val focusDispatcher = if (input == PlaybackInput.ROOT) Dispatchers.Default else Dispatchers.Main.immediate
+                focusJob=scope.launch(focusDispatcher) {
                     while (isActive) {
-                        val window = if (input == PlaybackInput.ROOT) root.focusedWindow() else null
-                        val observed = if (input == PlaybackInput.ROOT) window?.packageName else accessibility.focusedPackage()
-                        focusedWindow = window
-                        focusPackage=observed; focusObservedAt=android.os.SystemClock.elapsedRealtime()
+                        if (input == PlaybackInput.ROOT) {
+                            val probe = root.observeFocusedWindow(
+                                invalidateAuthorizationOnTimeout = focusObservation.window == null,
+                            )
+                            ensureActive()
+                            focusObservation = focusObservation.updateRoot(probe, android.os.SystemClock.elapsedRealtime())
+                        } else {
+                            focusObservation = FocusedWindow.Observation(
+                                accessibility.focusedPackage(), observedAtMs = android.os.SystemClock.elapsedRealtime(),
+                            )
+                        }
                         delay(100)
                     }
                 }
@@ -494,8 +499,7 @@ class CalibrationOverlayService : Service() {
                     if (PlaybackPreparation.pending === prepared) PlaybackPreparation.pending = null
                     focusJob?.cancel()
                     focusJob = null
-                    focusPackage = null
-                    focusedWindow = null
+                    focusObservation = FocusedWindow.Observation()
                     if (closeAfterPlayback) stopSelf()
                 }
             }
@@ -503,7 +507,7 @@ class CalibrationOverlayService : Service() {
         PlaybackPreparation.cancelPendingStart={ armJob?.cancel() }
         armJob?.start()
     }
-    private fun hasFreshGameFocus() = FocusedWindow.isFreshGame(focusPackage,focusObservedAt,android.os.SystemClock.elapsedRealtime())
+    private fun hasFreshGameFocus() = focusObservation.freshGame(android.os.SystemClock.elapsedRealtime())
     private fun gameUid(): Int? = runCatching {
         packageManager.getApplicationInfo(FocusedWindow.GAME_PACKAGE, 0).uid
     }.getOrNull()
@@ -1103,7 +1107,7 @@ class CalibrationOverlayService : Service() {
         val prepared = PlaybackPreparation.pending ?: run { reject("请重新选择曲目并开始"); return }
         val draft = layout ?: run { reject("布局不可用，请重新打开校准"); return }
         val before = snapshot ?: run { reject("屏幕信息不可用，请返回游戏后重试"); return }
-        val gameWindow = focusedWindow
+        val gameWindow = focusObservation.window
         val app = application as DeltaHarmonicaApp
         val backend = app.accessibilityBackend
         val root = app.rootBackend
@@ -1134,7 +1138,7 @@ class CalibrationOverlayService : Service() {
         }
         if (PlaybackPreparation.pending !== prepared || !hasFreshGameFocus() ||
             displaySnapshot(this) != before || runtimeState != planningState ||
-            (input == PlaybackInput.ROOT && (gameWindow == null || focusedWindow != gameWindow))) {
+            (input == PlaybackInput.ROOT && (gameWindow == null || focusObservation.window != gameWindow))) {
             reject("屏幕或游戏状态已变化，请重新预检")
             return
         }
@@ -1285,12 +1289,27 @@ class CalibrationOverlayService : Service() {
             }
             var currentSourceIndex: Int? = null
             var overlayRestored=false
-            fun environmentValid() = !destroyed && displaySnapshot(this@CalibrationOverlayService) == before &&
-                (if (touch != null) root.status().available else backend.status().available) &&
-                getSystemService(android.os.PowerManager::class.java).isInteractive &&
-                !getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked &&
-                Settings.canDrawOverlays(this@CalibrationOverlayService) && hasFreshGameFocus() &&
-                (input != PlaybackInput.ROOT || focusedWindow == gameWindow)
+            var environmentAbort: String? = null
+            fun environmentValid(): Boolean {
+                val focus = focusObservation
+                val reason = when {
+                    destroyed -> "悬浮服务已结束"
+                    displaySnapshot(this@CalibrationOverlayService) != before -> "屏幕或校准环境已变化"
+                    !(if (touch != null) root.status().available else backend.status().available) -> "输入后端状态已变化"
+                    !getSystemService(android.os.PowerManager::class.java).isInteractive -> "屏幕已关闭"
+                    getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked -> "屏幕已锁定"
+                    !Settings.canDrawOverlays(this@CalibrationOverlayService) -> "悬浮窗权限已失效"
+                    focus.packageName != FocusedWindow.GAME_PACKAGE -> "已失去游戏焦点"
+                    !focus.freshGame(android.os.SystemClock.elapsedRealtime()) -> "游戏焦点观测已过期"
+                    input == PlaybackInput.ROOT && focus.window != gameWindow -> "游戏窗口已重建"
+                    else -> null
+                }
+                if (reason != null && environmentAbort == null) {
+                    environmentAbort = reason
+                    Log.w("DeltaPlayback", "session=$sessionId environmentAbort=$reason")
+                }
+                return reason == null
+            }
             suspend fun prepareResume() {
                 resumingControls = true
                 removeSessionMusic()
@@ -1601,6 +1620,9 @@ class CalibrationOverlayService : Service() {
                 clockJob?.cancel()
                 removeSessionMusic()
                 val cleanup = touch?.let { root.closeTouch(it) }
+                if (outcome?.failure != null && environmentAbort != null) {
+                    outcome = outcome?.copy(failure = environmentAbort)
+                }
                 if (cleanup == RootCleanup.OBSERVED_IDLE) {
                     outcome = outcome?.copy(failure = "游戏触摸中断，Android 输入队列已清理")
                 } else if (root.releaseUncertain) {
@@ -1610,7 +1632,7 @@ class CalibrationOverlayService : Service() {
                     runtimeState = runtimeState.reset()
                 }
                 playbackRunner = null
-                focusJob?.cancel(); focusJob=null; focusPackage=null; focusedWindow=null
+                focusJob?.cancel(); focusJob=null; focusObservation=FocusedWindow.Observation()
                 PlaybackPreparation.activeInput = null
                 PlaybackPreparation.activeRunner = null
                 PlaybackPreparation.confirmResume = null
@@ -1675,7 +1697,7 @@ class CalibrationOverlayService : Service() {
         gamePanel?.releaseMusicKeyboard()
         removeSessionMusic()
         cancelGameMotion()
-        destroyed = true; PlaybackPreparation.cancelPendingStart=null; playbackRunner?.requestStop(); focusJob?.cancel(); focusJob=null; focusPackage=null; stopView?.let { runCatching { wm.removeViewImmediate(it) } }; stopView=null; displayManager.unregisterDisplayListener(listener); scope.cancel(); runCatching { removeMarkers() }
+        destroyed = true; PlaybackPreparation.cancelPendingStart=null; playbackRunner?.requestStop(); focusJob?.cancel(); focusJob=null; focusObservation=FocusedWindow.Observation(); stopView?.let { runCatching { wm.removeViewImmediate(it) } }; stopView=null; displayManager.unregisterDisplayListener(listener); scope.cancel(); runCatching { removeMarkers() }
         panel?.let { if (panelAttached) runCatching { wm.removeViewImmediate(it) } }; panelAttached = false; panel = null
         gamePanel?.dispose()
         super.onDestroy()

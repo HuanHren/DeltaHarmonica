@@ -19,6 +19,27 @@ class FocusedWindowTest {
         assertFalse(FocusedWindow.isFreshGame(null,1000,1100))
     }
 
+    @Test fun missingProbeKeepsOriginalObservationButAnExplicitFocusLossStopsImmediately() {
+        val game = FocusedWindow.parseProbe("mCurrentFocus=Window{abc u0 com.tencent.tmgp.dfm/.GameActivity}")
+        val starting = FocusedWindow.Observation().updateRoot(game, 1000)
+        val missing = starting.updateRoot(FocusedWindow.parseProbe("unexpected reply"), 1200)
+        assertSame(starting, missing)
+        assertTrue(missing.freshGame(1400))
+        assertFalse(missing.freshGame(1601))
+        val lost = missing.updateRoot(FocusedWindow.parseProbe("mCurrentFocus=null"), 1400)
+        assertFalse(lost.freshGame(1400))
+        assertNull(lost.window)
+    }
+
+    @Test fun timingOutAReadOnlyFocusProbeDoesNotDiscardRootAuthorization() = runBlocking {
+        val backend = RootBackend(RootCommandRunner { command, _ ->
+            if (command == "id -u") RootCommandResult.Success("0") else RootCommandResult.TimedOut
+        }) { ScreenSize(2670, 1200) }
+        assertTrue(backend.checkAccess().available)
+        assertNull(backend.observeFocusedWindow())
+        assertTrue(backend.status().available)
+    }
+
     @Test fun samePackageWindowsHaveDifferentIdentities() {
         val first = "  mCurrentFocus=Window{abc u0 com.tencent.tmgp.dfm/.GameActivity}"
         val second = "  mCurrentFocus=Window{def u0 com.tencent.tmgp.dfm/.GameActivity}"

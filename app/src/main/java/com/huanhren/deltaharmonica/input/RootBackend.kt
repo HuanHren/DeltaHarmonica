@@ -113,13 +113,16 @@ class RootBackend internal constructor(
     }
 
     /** Read-only focus query. Never synthesizes input or modifies system settings. */
-    suspend fun focusedPackage(): String? = focusedWindow()?.packageName
+    suspend fun focusedPackage(): String? =
+        observeFocusedWindow(invalidateAuthorizationOnTimeout = true)?.window?.packageName
 
-    internal suspend fun focusedWindow(): FocusedWindow.Identity? {
+    internal suspend fun observeFocusedWindow(
+        invalidateAuthorizationOnTimeout: Boolean = false,
+    ): FocusedWindow.Probe? {
         if (!status().available || !focusMutex.tryLock()) return null
         return try {
             when (val result=runner.run("dumpsys window | grep 'mCurrentFocus='", 3000)) {
-                is RootCommandResult.Success -> FocusedWindow.parseIdentity(result.output)
+                is RootCommandResult.Success -> FocusedWindow.parseProbe(result.output)
                 is RootCommandResult.Failure -> {
                     if (result.authorizationDenied || result.kind == RootCommandFailureKind.LAUNCH) {
                         authorization.recordFailure(result)
@@ -127,7 +130,7 @@ class RootBackend internal constructor(
                     null
                 }
                 RootCommandResult.TimedOut -> {
-                    authorization.recordFailure(result)
+                    if (invalidateAuthorizationOnTimeout) authorization.recordFailure(result)
                     null
                 }
             }
