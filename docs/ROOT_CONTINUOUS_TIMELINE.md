@@ -76,7 +76,7 @@ B 段以首音对齐，平均绝对起音偏差 2,505.44 ms，最大、P95、P99
 
 B-controls-16 的平均、最大、P95、P99 绝对起音偏差分别为 50.16、146.62、146.62、146.62 ms。相同 -37 dB 阈值下，平均与最大绝对时值偏差为 145.99 / 392.56 ms。游戏尾音会影响该时值测量。B 和 C 的 app 派发记录分别为 16/16 和 32/32，两次均确认释放，P95/P99 相对计划为 14/14 ms 与 14/15 ms。C 在原谱 2× 下，按当前控制顺序和最短触点时值无法同时保留原有节奏，预检显示总延长。
 
-### 候选 Android 隔离窗口
+### rc.1 Android 隔离窗口
 
 每次检查实际收到的 View DOWN/UP、屏幕位置、指针、事件顺序和 helper 时间戳。派发迟到相对 helper 计划。时值偏差相对计划按住时长，单位均为毫秒。
 
@@ -95,9 +95,10 @@ B-controls-16 的平均、最大、P95、P99 绝对起音偏差分别为 50.16�
 
 构建环境为 Temurin 21.0.12.1、Gradle 9.9.1、AGP 9.5.1、Kotlin 2.4.21、SDK 37.2、Build Tools 37.0.0。真机为 Xiaomi 23127PN0CC，API 36，1200 × 2670，480 dpi。
 
-- JVM 343 项通过，0 失败，0 跳过。包括长计划上传、协议不一致、停止、暂停顺移、ROOT 失联和迟到终止。
+- rc.2 JVM 345 项通过，0 失败，0 跳过。包括长计划上传、协议不一致、停止、暂停顺移、Root 失联、迟到恢复和严重迟到终止。
 - Debug、Instrumented、Instrumentation APK 和个人签名 Release 构建通过。Lint 0 错误、86 警告、7 提示。
 - 守护脚本执行了常规隔离回归，首轮 32 项常规用例通过，3 项新增 Root 用例在测试布局校验中失败。修正测试布局后，混合复跑出现 Compose 操作超时，设置用例停滞，仅终止了隔离应用进程。独立复跑三项 Root 用例全部通过。
+- rc.2 的 360 音两档、暂停继续及停止用例通过。8 和 16 音用例首轮出现释放回执拒绝，Android 随后报告无活动触点。同版本通过 `-RootShortOnly` 复跑该用例并收到释放确认。
 
 ## F. 安全与兼容性
 
@@ -105,10 +106,11 @@ B-controls-16 的平均、最大、P95、P99 绝对起音偏差分别为 50.16�
 
 ## G. 交付
 
-分支 `feature/root-continuous-timeline`。候选 `2.4.0-rc.1` 保留 versionCode 5 以便同签名基线对照。合并和稳定发布以真实游戏发声验收为门槛。 [草稿 PR #3](https://github.com/HuanHren/DeltaHarmonica/pull/3)
+分支 `feature/root-continuous-timeline`。候选保留 versionCode 5 以便同签名基线对照。合并和稳定发布以真实游戏发声验收为门槛。 [草稿 PR #3](https://github.com/HuanHren/DeltaHarmonica/pull/3)
 
 | APK | SHA-256 |
 | --- | --- |
+| `DeltaHarmonica-2.4.0-rc.2.apk` | `622B147EA52438B5B22218DA053C247485340C38D0D846CE6868BD740BC7A72E` |
 | `DeltaHarmonica-2.4.0-rc.1.apk` | `F17E9DB980BD9E3FD2DFC4284036C076EA61518E90305463F86950A0E26A1102` |
 | 真机基线 `2.3.0` | `448489E827D7336FADE45B180DD0C6DB9E671ABB92423D998AFD60BC966D597A` |
 | 两者共有签名证书 | `25A5A0A57BAE88831D3849721D5F9CE69CD438196B82D704999EAC2908739154` |

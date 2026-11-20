@@ -95,4 +95,6 @@ $testHash = (Get-FileHash .\app\build\outputs\apk\androidTest\instrumented\app-i
 
 如 ADB shell 已获得 Root 授权，可在运行时追加 `-RootContinuous`。这个选项增加三项触点用例，检查隔离窗口的 8、16、360 音在 1×、2× 的触点时间、重触发及控制顺序，并验证暂停、继续、停止和释放。辅助进程使用隔离宿主的 APK 和 UID，隔离应用保持禁用 Root 授权入口。用 `-RootContinuousOnly` 可以单独执行同一套安全核验下的三项 Root 测试。
 
+如只需复跑 8 和 16 音触点用例，可用 `-RootShortOnly`。各选项使用同一套设备、APK、隔离包和卸载防护检查。
+
 保存脚本输出的 `device-commands.jsonl` 证据路径。记录隔离窗口的事件和真实游戏发声时分别保存对应证据。

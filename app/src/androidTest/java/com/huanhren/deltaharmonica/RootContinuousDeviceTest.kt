@@ -253,6 +253,7 @@ class RootContinuousDeviceTest {
             instrumentation.runOnMainSync {
                 val activity = resumedIsolatedActivity()
                 val view = RecordingView(activity)
+                view.keepScreenOn = true
                 activity.addContentView(view, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
                 receiver.set(view)
             }
@@ -291,11 +292,21 @@ class RootContinuousDeviceTest {
                     process.outputStream.flush()
                     process.expectReady()
                     val touch = RootGestureConnection(process, null)
+                    var failure: Throwable? = null
                     try {
                         check(view.focused)
                         test(view, fixture.first, fixture.second, touch)
+                    } catch (problem: Throwable) {
+                        failure = problem
+                        throw problem
                     } finally {
-                        assertEquals("Helper cleanup acknowledgement", RootCleanup.ACKNOWLEDGED, touch.close())
+                        try {
+                            assertEquals("Helper cleanup acknowledgement", RootCleanup.ACKNOWLEDGED, touch.close())
+                        } catch (cleanupFailure: Throwable) {
+                            val original = failure
+                            if (original == null) throw cleanupFailure
+                            original.addSuppressed(cleanupFailure)
+                        }
                     }
                 }
             }
