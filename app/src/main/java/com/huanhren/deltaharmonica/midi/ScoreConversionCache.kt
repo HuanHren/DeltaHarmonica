@@ -10,9 +10,9 @@ import java.security.MessageDigest
 
 internal object ScoreConversionCache {
     // Bump the corresponding version when parsing semantics or the playable script changes.
-    private const val MIDI_READER_VERSION = 1
+    private const val MIDI_READER_VERSION = 2
     private const val DFHS_READER_VERSION = 1
-    private const val CONVERTER_VERSION = 1
+    private const val CONVERTER_VERSION = 2
     private const val MAX_ENTRIES = 8
     private const val MAX_RETAINED_ELEMENTS = 40_000
     private const val HEX = "0123456789abcdef"

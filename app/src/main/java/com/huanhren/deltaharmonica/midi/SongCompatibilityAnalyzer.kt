@@ -33,6 +33,10 @@ data class SongCompatibilityReport(
     val semitoneNotes: Int = 0,
     val warnings: List<String> = emptyList(),
     val errors: List<String> = emptyList(),
+    val parsedNoteCount: Int? = null,
+    val retainedSourceNoteCount: Int? = null,
+    val overlapClippedNoteCount: Int? = null,
+    val overlapDroppedNoteCount: Int? = null,
 )
 
 internal data class MidiScoreSource(val format: ScoreFormat, val midi: ParsedMidi)
@@ -91,6 +95,10 @@ object SongCompatibilityAnalyzer {
             semitoneNotes = events.count { it.semitoneEnabled },
             warnings = provenance?.warnings.orEmpty(),
             errors = errors,
+            parsedNoteCount = provenance?.parsedNoteCount,
+            retainedSourceNoteCount = provenance?.retainedSourceNoteCount,
+            overlapClippedNoteCount = provenance?.overlapClippedNoteCount,
+            overlapDroppedNoteCount = provenance?.overlapDroppedNoteCount,
         )
     }
 

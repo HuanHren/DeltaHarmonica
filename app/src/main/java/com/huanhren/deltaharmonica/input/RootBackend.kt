@@ -4,6 +4,7 @@ import android.util.Log
 import com.huanhren.deltaharmonica.model.ScreenPoint
 import com.huanhren.deltaharmonica.model.ScreenSize
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -13,6 +14,7 @@ class RootBackend internal constructor(
     private val apkPath: String?,
     private val ownUid: Int,
     internal val authorization: RootPermissionManager,
+    private val releaseGuard: RootReleaseGuard? = null,
     private val screenSize: () -> ScreenSize,
 ) : InputBackend {
     constructor(
@@ -20,11 +22,11 @@ class RootBackend internal constructor(
         apkPath: String? = null,
         ownUid: Int = 0,
         screenSize: () -> ScreenSize,
-    ) : this(runner, apkPath, ownUid, RootPermissionManager(runner), screenSize)
+    ) : this(runner, apkPath, ownUid, RootPermissionManager(runner), screenSize = screenSize)
 
     override val name = "Root"
     private val mutex = Mutex()
-    @Volatile internal var releaseUncertain = false
+    @Volatile internal var releaseUncertain = releaseGuard?.isPending() == true
         private set
     @Volatile internal var preferred = false
     // A read-only focus probe must not be blocked by an in-flight input command.
@@ -32,7 +34,7 @@ class RootBackend internal constructor(
     override fun status(): BackendStatus {
         val state = authorization.state.value
         return when {
-            releaseUncertain -> BackendStatus(BackendAvailability.NOT_CONNECTED, "上次 Root 触摸释放待确认，请检查游戏后重启应用")
+            releaseUncertain -> BackendStatus(BackendAvailability.NOT_CONNECTED, "上次 Root 触摸释放待确认，请重启设备后再演奏")
             state.checking -> BackendStatus(BackendAvailability.NOT_CONNECTED, "正在检查 Root 授权…")
             state.verified -> BackendStatus(BackendAvailability.AVAILABLE, "可用 · 已获得 Root 授权")
             else -> BackendStatus(BackendAvailability.NOT_ENABLED, state.failure ?: when (state.authorization) {
@@ -59,6 +61,10 @@ class RootBackend internal constructor(
             if (connection == null) {
                 authorization.updateInput(RootInputReadiness.UNAVAILABLE, "Root 触摸初始化失败，请重新检查授权")
             } else {
+                if (withContext(Dispatchers.IO) { releaseGuard?.begin() == false }) {
+                    authorization.updateInput(RootInputReadiness.UNAVAILABLE, "无法记录 Root 触控释放状态")
+                    return null
+                }
                 authorization.updateInput(RootInputReadiness.READY)
                 handedOff = true
             }
@@ -90,7 +96,8 @@ class RootBackend internal constructor(
                     }
                 }
             }
-            releaseUncertain = !outcome.confirmed
+            val guardCleared = outcome.confirmed && withContext(Dispatchers.IO) { releaseGuard?.confirm() != false }
+            releaseUncertain = !guardCleared
             if (releaseUncertain) Log.e("DeltaRoot", "helper did not confirm input cleanup")
             if (outcome == RootCleanup.OBSERVED_IDLE) Log.i("DeltaRoot", "input dispatcher idle after helper closed")
             outcome
@@ -106,11 +113,13 @@ class RootBackend internal constructor(
     }
 
     /** Read-only focus query. Never synthesizes input or modifies system settings. */
-    suspend fun focusedPackage(): String? {
+    suspend fun focusedPackage(): String? = focusedWindow()?.packageName
+
+    internal suspend fun focusedWindow(): FocusedWindow.Identity? {
         if (!status().available || !focusMutex.tryLock()) return null
         return try {
             when (val result=runner.run("dumpsys window | grep 'mCurrentFocus='", 3000)) {
-                is RootCommandResult.Success -> FocusedWindow.parse(result.output)
+                is RootCommandResult.Success -> FocusedWindow.parseIdentity(result.output)
                 is RootCommandResult.Failure -> {
                     if (result.authorizationDenied || result.kind == RootCommandFailureKind.LAUNCH) {
                         authorization.recordFailure(result)
@@ -170,9 +179,11 @@ class RootBackend internal constructor(
             return TapResult.InvalidPoint("坐标不在默认屏幕内")
         if (apkPath != null) {
             val connection = openTouch(ownUid) ?: return TapResult.Unavailable("Root 触摸初始化失败或正在使用")
-            return try {
+            val cleanup: RootCleanup
+            val dispatched = try {
                 connection.play(com.huanhren.deltaharmonica.playback.CombinedGesture.create(point, 45, emptyList()))
-            } finally { closeTouch(connection) }
+            } finally { cleanup = closeTouch(connection) }
+            return if (cleanup.confirmed && !releaseUncertain) dispatched else TapResult.Unavailable("Root 触摸释放待确认")
         }
         if (!mutex.tryLock()) return TapResult.Busy
         try {

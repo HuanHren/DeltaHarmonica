@@ -101,6 +101,7 @@ class CalibrationOverlayService : Service() {
     private var armJob: Job? = null
     private var focusJob: Job? = null
     @Volatile private var focusPackage: String? = null
+    @Volatile private var focusedWindow: FocusedWindow.Identity? = null
     @Volatile private var focusObservedAt: Long = 0
     private var playbackRunner: PlaybackRunner? = null
     private var stopView: View? = null
@@ -471,9 +472,12 @@ class CalibrationOverlayService : Service() {
                 }
                 Log.i("DeltaPlayback", "preflight backend=$input requestedRoot=$preferRoot")
                 focusPackage=null; focusObservedAt=0
+                focusedWindow = null
                 focusJob=scope.launch {
                     while (isActive) {
-                        val observed = input.focusedPackage(root::focusedPackage, accessibility::focusedPackage)
+                        val window = if (input == PlaybackInput.ROOT) root.focusedWindow() else null
+                        val observed = if (input == PlaybackInput.ROOT) window?.packageName else accessibility.focusedPackage()
+                        focusedWindow = window
                         focusPackage=observed; focusObservedAt=android.os.SystemClock.elapsedRealtime()
                         delay(100)
                     }
@@ -491,6 +495,7 @@ class CalibrationOverlayService : Service() {
                     focusJob?.cancel()
                     focusJob = null
                     focusPackage = null
+                    focusedWindow = null
                     if (closeAfterPlayback) stopSelf()
                 }
             }
@@ -1098,10 +1103,15 @@ class CalibrationOverlayService : Service() {
         val prepared = PlaybackPreparation.pending ?: run { reject("请重新选择曲目并开始"); return }
         val draft = layout ?: run { reject("布局不可用，请重新打开校准"); return }
         val before = snapshot ?: run { reject("屏幕信息不可用，请返回游戏后重试"); return }
+        val gameWindow = focusedWindow
         val app = application as DeltaHarmonicaApp
         val backend = app.accessibilityBackend
         val root = app.rootBackend
         if (root.releaseUncertain) { reject("上次 Root 触摸释放待确认，请先检查游戏"); return }
+        if (input == PlaybackInput.ACCESSIBILITY && prepared.plan.rootTiming != null) {
+            reject("Root 当前不可用。使用无障碍演奏时，请选择无障碍后端并重新预检")
+            return
+        }
         if ((input == PlaybackInput.ACCESSIBILITY && !backend.status().available) || !Settings.canDrawOverlays(this)) {
             reject("请检查输入后端和悬浮窗权限"); return
         }
@@ -1118,11 +1128,13 @@ class CalibrationOverlayService : Service() {
                     prepared.start, prepared.count, prepared.speed, combined = prepared.plan.combined,
                     minimumTouchMs = prepared.plan.minimumTouchMs, combinedLeadMs = prepared.plan.combinedLeadMs,
                     gestureOverheadMs = prepared.plan.gestureOverheadMs,
+                    rootTiming = prepared.plan.rootTiming,
                     checkActive = { ensureActive() })
             }.getOrNull()
         }
         if (PlaybackPreparation.pending !== prepared || !hasFreshGameFocus() ||
-            displaySnapshot(this) != before || runtimeState != planningState) {
+            displaySnapshot(this) != before || runtimeState != planningState ||
+            (input == PlaybackInput.ROOT && (gameWindow == null || focusedWindow != gameWindow))) {
             reject("屏幕或游戏状态已变化，请重新预检")
             return
         }
@@ -1131,7 +1143,9 @@ class CalibrationOverlayService : Service() {
         }
         val panelView = panel ?: return
         val originalShown = shown
-        val runner = PlaybackRunner(); playbackRunner = runner; PlaybackPreparation.activeRunner = runner
+        val runner = PlaybackRunner(android.os.SystemClock::uptimeMillis)
+        playbackRunner = runner
+        PlaybackPreparation.activeRunner = runner
         Log.i("DeltaPlayback", "session start count=${fresh.events.size} combined=${fresh.combined}")
         PlaybackPreparation.progress.value = PlaybackProgress(fresh.events.size, state = "正在隐藏悬浮层",
             phase = PlaybackStatus.CHECKING, durationMs = fresh.estimatedTotalMs)
@@ -1147,8 +1161,13 @@ class CalibrationOverlayService : Service() {
             var expandedOrigin: ScreenPoint? = null
             var accessibilityGestureActive = false
             var resumingControls = false
+            var pausedState: InstrumentRuntimeState? = null
+            var resumeConfirmedUntil = -1L
             var queuedTrack: String? = null
             var touch: RootGestureConnection? = null
+            val sessionId = java.util.UUID.randomUUID().toString()
+            val rootMetrics = fresh.rootTiming?.let { RootPlaybackMetrics(it.maxDownLatenessMs) }
+            val traceTouches = Log.isLoggable("DeltaRootTrace", Log.DEBUG)
             val screenTargets = OverlayGeometry.protectedTouchPoints(draft.targets.map { Coordinates.toScreen(it.position, before.size) })
 
             fun canInteractWithSessionMusic(): Boolean {
@@ -1267,16 +1286,26 @@ class CalibrationOverlayService : Service() {
             var currentSourceIndex: Int? = null
             var overlayRestored=false
             fun environmentValid() = !destroyed && displaySnapshot(this@CalibrationOverlayService) == before &&
-                (if (touch != null) root.status().available else backend.status().available) && Settings.canDrawOverlays(this@CalibrationOverlayService) && hasFreshGameFocus()
+                (if (touch != null) root.status().available else backend.status().available) &&
+                getSystemService(android.os.PowerManager::class.java).isInteractive &&
+                !getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked &&
+                Settings.canDrawOverlays(this@CalibrationOverlayService) && hasFreshGameFocus() &&
+                (input != PlaybackInput.ROOT || focusedWindow == gameWindow)
+            suspend fun prepareResume() {
+                resumingControls = true
+                removeSessionMusic()
+                if (sessionBar?.expanded == true) resizeSessionBar(false) else updateSessionBar()
+                verifySessionWindow()
+            }
             suspend fun playRoot(connection: RootGestureConnection, gesture: CombinedGesture, index: Int?, duration: Long): TapResult {
                 if (gesture.strokes.any { !root.validPoint(it.point) }) return TapResult.InvalidPoint("坐标不在默认屏幕内")
                 return connection.play(gesture, stop = { runner.stopRequested || !environmentValid() }) { timing ->
                     val down = timing.noteDown
                     val up = timing.noteUp
                     if (index != null && down != null) {
-                        PlaybackPreparation.actualTimings[index] = ActualTiming(
+                        PlaybackPreparation.recordTiming(index, ActualTiming(
                             down - sessionStartMs, up?.minus(sessionStartMs), 0, duration, "Root ${timing.status}",
-                        )
+                        ))
                         Log.i("DeltaRoot", "event=$index requestedMs=$duration down=$down up=$up status=${timing.status}")
                     }
                 }
@@ -1298,21 +1327,33 @@ class CalibrationOverlayService : Service() {
                         }) else null
                         root.openTouch(uid, volumeStop)
                     }
-                    if (touch == null && !backend.status().available) {
-                        reject("Root 输入初始化失败，无障碍回退不可用")
-                        outcome = PlaybackResult(0, fresh.events.size, false, "Root 输入初始化失败", 0, 0)
+                    if (root.releaseUncertain || (touch == null && (fresh.rootTiming != null || !backend.status().available))) {
+                        val message = if (root.releaseUncertain) "Root 触摸释放待确认"
+                            else "Root 输入初始化失败。使用无障碍演奏时，请选择无障碍后端并重新预检"
+                        reject(message)
+                        outcome = PlaybackResult(0, fresh.events.size, false, message, 0, 0)
                         return@launch
                     }
                     if (touch == null) Log.w("DeltaRoot", "startup fallback to accessibility before touch")
                 }
-                val continuousSequence = if (touch != null && fresh.combined) {
-                    RootSequencePlanner.build(fresh, draft.targets.associate {
+                val continuousSequence = if (touch != null && fresh.rootTiming != null) {
+                    val points = draft.targets.associate {
                         it.id to Coordinates.toScreen(it.position, before.size)
-                    })
+                    }
+                    check(points.values.all(root::validPoint)) { "Root 触控坐标超出默认屏幕" }
+                    withContext(Dispatchers.Default) {
+                        RootSequencePlanner.build(fresh, points, checkActive = { ensureActive() })
+                    }
                 } else null
                 val actualInput = if (touch != null) PlaybackInput.ROOT else PlaybackInput.ACCESSIBILITY
                 PlaybackPreparation.activeInput = actualInput
-                Log.i("DeltaPlayback", "input backend=$actualInput speed=${prepared.speed}")
+                val provenance = prepared.script.provenance
+                val timing = fresh.rootTiming
+                Log.i("DeltaPlayback", "session=$sessionId backend=$actualInput helperReady=${touch != null} " +
+                    "songId=${app.model.midiWorkspace.songId ?: "unsaved"} source=${provenance?.sourceNoteCount} " +
+                    "parsed=${provenance?.parsedNoteCount} retained=${provenance?.retainedSourceNoteCount} " +
+                    "clipped=${provenance?.overlapClippedNoteCount} unmapped=${provenance?.unmappedCount} " +
+                    "converted=${prepared.script.events.size} planned=${fresh.events.size} speed=${prepared.speed} timing=$timing")
                 outcome = runner.run(fresh,
                     hide = {
                         removeMarkers()
@@ -1362,7 +1403,7 @@ class CalibrationOverlayService : Service() {
                                 playRoot(connection, CombinedGesture.create(action.point, duration, emptyList()), index.takeIf { target.type == TargetType.NOTE }, duration)
                             else backend.perform(action, { dispatched = it }, { callback = it }, FocusedWindow.GAME_PACKAGE)
                             if(target.type == TargetType.NOTE && index != null && dispatched != null)
-                                PlaybackPreparation.actualTimings[index]=ActualTiming(dispatched!!-sessionStartMs,callback?.minus(sessionStartMs),0,duration,timingResult(result))
+                                PlaybackPreparation.recordTiming(index, ActualTiming(dispatched!!-sessionStartMs,callback?.minus(sessionStartMs),0,duration,timingResult(result)))
                             if (targetId.startsWith("REGION_")) runtimeState = runtimeState.regionResult(Region.valueOf(targetId.removePrefix("REGION_")),result)
                             if (targetId == "SEMITONE_TOGGLE") {
                                 val next = runtimeState.semitoneEnabled?.not()
@@ -1411,7 +1452,37 @@ class CalibrationOverlayService : Service() {
                         if (phase == PlaybackPhase.GESTURE_FINISHED) accessibilityGestureActive = false
                         if (phase == PlaybackPhase.RESUMED) resumingControls = false
                         val current = PlaybackPreparation.progress.value
+                        if (phase == PlaybackPhase.PAUSED && continuousSequence != null) {
+                            pausedState = runtimeState
+                            resumeConfirmedUntil = -1L
+                            PlaybackPreparation.confirmResume = {
+                                val expected = pausedState
+                                if (expected == null || expected != runtimeState || expected.semitoneEnabled == null ||
+                                    !environmentValid()) {
+                                    runtimeState = runtimeState.reset()
+                                    PlaybackPreparation.stopPlayback()
+                                    false
+                                } else {
+                                    val now = android.os.SystemClock.uptimeMillis()
+                                    if (now <= resumeConfirmedUntil) {
+                                        resumeConfirmedUntil = -1L
+                                        true
+                                    } else {
+                                        resumeConfirmedUntil = now + 15_000L
+                                        val message = withStudioLocale().getString(R.string.session_root_confirm_resume,
+                                            expected.pitchRegion?.name ?: "—",
+                                            overlayText(if (expected.semitoneEnabled) R.string.session_semitone_on else R.string.session_semitone_off))
+                                        Toast.makeText(this@CalibrationOverlayService, message, Toast.LENGTH_LONG).show()
+                                        false
+                                    }
+                                }
+                            }
+                        }
+                        if (phase == PlaybackPhase.RESUMED) PlaybackPreparation.confirmResume = null
                         if (current.phase != PlaybackStatus.STOPPING) when (phase) {
+                            PlaybackPhase.RUNNING -> if (continuousSequence == null) {
+                                PlaybackPreparation.progress.value = current.copy(phase = PlaybackStatus.PLAYING, state = "正在演奏")
+                            }
                             PlaybackPhase.PAUSED -> PlaybackPreparation.progress.value =
                                 current.copy(phase = PlaybackStatus.PAUSED, elapsedMs = runner.elapsedMs())
                             PlaybackPhase.RESUMED -> PlaybackPreparation.progress.value =
@@ -1460,16 +1531,11 @@ class CalibrationOverlayService : Service() {
                             else backend.performCombined(gesture, { dispatched = it }, { callback = it }, FocusedWindow.GAME_PACKAGE)
                         } catch (e: IllegalArgumentException) { TapResult.Unavailable("组合目标重合或时长无效") }
                         if(dispatched != null)
-                            PlaybackPreparation.actualTimings[item.sourceIndex]=ActualTiming(dispatched!!-sessionStartMs,callback?.minus(sessionStartMs),if(controls.isEmpty()) 0 else fresh.combinedLeadMs,duration,timingResult(result))
+                            PlaybackPreparation.recordTiming(item.sourceIndex, ActualTiming(dispatched!!-sessionStartMs,callback?.minus(sessionStartMs),if(controls.isEmpty()) 0 else fresh.combinedLeadMs,duration,timingResult(result)))
                         if (item.regionSwitch) runtimeState=runtimeState.regionResult(item.event.pitchRegion,result)
                         if (item.semitoneSwitch) runtimeState=runtimeState.semitoneResult(item.event.semitoneEnabled,result)
                         result
-                    }, onResuming = {
-                        resumingControls = true
-                        removeSessionMusic()
-                        if (sessionBar?.expanded == true) resizeSessionBar(false) else updateSessionBar()
-                        verifySessionWindow()
-                    }, dispatchContinuous = continuousSequence?.let { sequence ->
+                    }, onResuming = ::prepareResume, dispatchContinuous = continuousSequence?.let { sequence ->
                         var rootSequenceStarted: Long? = null
                         suspend fun runSequence(
                             onNote: (Int, Long?, Long?) -> Unit,
@@ -1482,12 +1548,6 @@ class CalibrationOverlayService : Service() {
                                 pause = isPaused,
                                 onNote = { index, down, up ->
                                     val item = fresh.events[index]
-                                    val rootOrigin = requireNotNull(rootSequenceStarted) { "Root 连续演奏未记录开始时间" }
-                                    PlaybackPreparation.actualTimings[item.sourceIndex] = ActualTiming(
-                                        down - rootOrigin, up?.minus(rootOrigin),
-                                        if (item.regionSwitch || item.semitoneSwitch) fresh.combinedLeadMs else 0,
-                                        item.predictedEndMs - item.predictedStartMs, "Root continuous OK",
-                                    )
                                     if (item.regionSwitch)
                                         runtimeState = runtimeState.regionResult(item.event.pitchRegion, TapResult.Completed)
                                     if (item.semitoneSwitch)
@@ -1496,7 +1556,35 @@ class CalibrationOverlayService : Service() {
                                 },
                                 onPaused = onPaused,
                                 onResumed = onResumed,
-                                onStarted = { rootSequenceStarted = it },
+                                onStarted = {
+                                    runner.continuousStarted(it)
+                                    rootSequenceStarted = it
+                                    val progress = PlaybackPreparation.progress.value
+                                    if (!runner.stopRequested) {
+                                        PlaybackPreparation.progress.value = progress.copy(phase = PlaybackStatus.PLAYING, state = "正在演奏")
+                                        updateSessionBar()
+                                    }
+                                },
+                                beforeResume = {
+                                    withTimeoutOrNull(2_000L) {
+                                        prepareResume()
+                                        environmentValid() && pausedState == runtimeState && runtimeState.semitoneEnabled != null
+                                    } == true
+                                },
+                                onTiming = { index, planned, down, up ->
+                                    val item = fresh.events[index]
+                                    val duration = item.predictedEndMs - item.predictedStartMs
+                                    val rootOrigin = requireNotNull(rootSequenceStarted)
+                                    PlaybackPreparation.recordTiming(item.sourceIndex, ActualTiming(
+                                        down - rootOrigin, up - rootOrigin, sequence[index].strokes.last().startMs,
+                                        duration, "Root 已派发",
+                                    ))
+                                    rootMetrics?.record(planned, down, up, duration, item.predictedStartMs - item.requestedStartMs)
+                                    if (traceTouches) Log.d("DeltaRootTrace", "session=$sessionId index=${item.sourceIndex} " +
+                                        "requested=${item.requestedStartMs} planned=$planned down=$down up=$up duration=$duration " +
+                                        "pitch=${item.event.midiNote} sourcePitch=${item.event.midiNote - prepared.script.transpose} " +
+                                        "key=${item.event.noteKeyId} region=${item.event.pitchRegion} semitone=${item.event.semitoneEnabled} result=OK")
+                                },
                             )
                         val execute: suspend (
                             (Int, Long?, Long?) -> Unit, () -> Boolean, () -> Unit, () -> Unit
@@ -1516,11 +1604,17 @@ class CalibrationOverlayService : Service() {
                 } else if (root.releaseUncertain) {
                     outcome = outcome?.copy(failure = "Root 触摸释放待确认")
                 }
+                if (outcome?.failure != null || outcome?.stopped != false || root.releaseUncertain) {
+                    runtimeState = runtimeState.reset()
+                }
                 playbackRunner = null
-                focusJob?.cancel(); focusJob=null; focusPackage=null
+                focusJob?.cancel(); focusJob=null; focusPackage=null; focusedWindow=null
                 PlaybackPreparation.activeInput = null
                 PlaybackPreparation.activeRunner = null
-                Log.i("DeltaPlayback", "session result completed=${outcome?.completed} remaining=${outcome?.remaining} stopped=${outcome?.stopped} elapsedMs=${outcome?.elapsedMs} maxLatenessMs=${outcome?.maxLatenessMs} failure=${outcome?.failure}")
+                PlaybackPreparation.confirmResume = null
+                Log.i("DeltaPlayback", "session=$sessionId completed=${outcome?.completed ?: 0} remaining=${outcome?.remaining ?: fresh.events.size} " +
+                    "stopped=${outcome?.stopped} elapsedMs=${outcome?.elapsedMs} switchesRegion=${outcome?.regionSwitches} " +
+                    "switchesSemitone=${outcome?.semitoneSwitches} cleanup=$cleanup ${rootMetrics?.summary().orEmpty()} failure=${outcome?.failure}")
                 PlaybackPreparation.progress.value = PlaybackPreparation.progress.value.copy(phase=if(outcome == null || outcome?.failure != null) PlaybackStatus.FAILED else PlaybackStatus.COMPLETED,
                     elapsedMs = outcome?.elapsedMs ?: runner.elapsedMs(), stopped = outcome?.stopped == true, state = when {
                     outcome == null -> overlayText(R.string.overlay_interrupted)

@@ -27,6 +27,7 @@ object PlaybackPreparation {
     var pending: PreparedPlayback? = null
     var activeRunner: PlaybackRunner? = null
     internal var activeInput: PlaybackInput? = null
+    internal var confirmResume: (() -> Boolean)? = null
     var cancelPendingStart: (() -> Unit)? = null
     var controlsConfirmed = false
     val progress = MutableStateFlow(PlaybackProgress())
@@ -40,10 +41,20 @@ object PlaybackPreparation {
                 runner.requestPause()
                 progress.value = current.copy(state = "等待当前音符释放", phase = PlaybackStatus.PAUSING)
             }
-            PlaybackStatus.PAUSED -> runner.requestResume()
+            PlaybackStatus.PAUSED -> {
+                if (confirmResume?.invoke() == false) return false
+                runner.requestResume()
+            }
             else -> return false
         }
         return true
+    }
+
+    internal fun recordTiming(index: Int, timing: ActualTiming) {
+        if (actualTimings.size >= 1_024 && index !in actualTimings) {
+            actualTimings.remove(actualTimings.keys.first())
+        }
+        actualTimings[index] = timing
     }
 
     fun stopPlayback(): Boolean {

@@ -255,17 +255,18 @@ class AppViewModel(
             val calibratedLayout = requireNotNull(layout) { "请先保存校准布局" }
             val savedLayout = state.value.saved
             val speed = workspace.speed
-            // Root runs its full score on one input timeline; the gesture path remains
-            // configurable for Accessibility.
-            val combined = workspace.combinedMode || rootBackend.preferred
-            val minimumTouchMs = if (rootBackend.preferred) maxOf(workspace.minimumTouchMs, 45L)
-                else workspace.minimumTouchMs
+            val minimumTouchMs = workspace.minimumTouchMs
+            val rootTiming = if (rootBackend.preferred) {
+                val candidate = com.huanhren.deltaharmonica.playback.RootPlaybackTiming()
+                candidate.copy(minNoteHoldMs = maxOf(minimumTouchMs, candidate.minNoteHoldMs))
+            } else null
+            val combined = workspace.combinedMode && rootTiming == null
             val combinedLeadMs = workspace.combinedLeadMs
             val planStarted = System.nanoTime()
             val plan = withContext(Dispatchers.Default) {
                 PlaybackPlanner.plan(script, calibratedLayout, runtime.pitchRegion, runtime.semitoneEnabled,
                     0, count, speed, combined = combined, minimumTouchMs = minimumTouchMs, combinedLeadMs = combinedLeadMs,
-                gestureOverheadMs = if (rootBackend.preferred) 40 else 30,
+                    rootTiming = rootTiming,
                     checkActive = { ensureActive() })
             }
             logScoreTiming("playback_plan", planStarted)

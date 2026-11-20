@@ -5,8 +5,12 @@ import android.os.Looper
 import android.util.Log
 import com.huanhren.deltaharmonica.playback.CombinedGesture
 import com.huanhren.deltaharmonica.playback.ContinuousPlaybackResult
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -15,49 +19,64 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
+import java.io.OutputStream
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
-internal class RootGestureConnection private constructor(
-    private val process: Process,
+internal class RootGestureConnection(
+    process: Process,
     private val onVolumeDown: (() -> Unit)?,
 ) {
-    private val commands = process.outputStream.bufferedWriter()
-    private val replies = Channel<String>(Channel.UNLIMITED)
+    private val commands = RootCommandPipe(process.outputStream)
+    private val replies = Channel<String>(RootSequenceProtocol.BUFFER_SIZE)
+    private val shutdown = CompletableDeferred<RootCleanup>()
     private val gate = Mutex()
+    private var nextSequence = 0L
+    private val activeSequence = AtomicLong()
+    private val lastPongNanos = AtomicLong()
     private var usable = true
     @Volatile private var volumeStopped = false
 
     init {
-        Thread {
+        Thread({
             try {
                 process.inputStream.bufferedReader().useLines { lines ->
-                    lines.filter { it.startsWith("DELTA ") }.forEach { line ->
+                    for (line in lines) {
+                        if (!line.startsWith("DELTA ")) continue
                         val reply = line.removePrefix("DELTA ")
                         when {
+                            reply == "CLOSED" -> shutdown.complete(RootCleanup.ACKNOWLEDGED)
+                            reply == "UNCONFIRMED" -> shutdown.complete(RootCleanup.REJECTED)
                             reply.startsWith("VOLUME ") -> {
                                 volumeStopped = true
-                                Log.i("DeltaRoot", "volume press t=${reply.substringAfter(' ')}")
+                                Log.i(TAG, "volume press t=${reply.substringAfter(' ')}")
                                 Handler(Looper.getMainLooper()).post { onVolumeDown?.invoke() }
                             }
-                            reply == "NO_VOLUME_MONITOR" -> Log.w("DeltaRoot", "built-in volume key monitor unavailable")
-                            reply == "VOLUME_READY" -> Log.i("DeltaRoot", "built-in volume key monitor initialized")
-                            else -> replies.trySend(reply)
+                            reply == "NO_VOLUME_MONITOR" -> Log.w(TAG, "built-in volume key monitor unavailable")
+                            reply == "VOLUME_READY" -> Log.i(TAG, "built-in volume key monitor initialized")
+                            reply.startsWith("SEQ ") && reply.endsWith(" PONG") -> {
+                                if (reply == "SEQ ${activeSequence.get()} PONG") {
+                                    lastPongNanos.set(System.nanoTime())
+                                }
+                            }
+                            else -> if (replies.trySend(reply).isFailure) abortPipe()
                         }
                     }
                 }
             } catch (_: IOException) {
                 // A lost pipe is reported by the receiver as an uncertain release.
-            } finally { replies.close() }
-        }.apply { isDaemon = true; start() }
+            } finally {
+                abortPipe()
+                shutdown.complete(RootCleanup.NO_ACK)
+            }
+        }, "DeltaRootResponses").apply { isDaemon = true; start() }
     }
 
-    private suspend fun send(command: String) = withContext(Dispatchers.IO) {
-        runCatching {
-            synchronized(commands) {
-                commands.write(command)
-                commands.newLine()
-                commands.flush()
-            }
-        }.isSuccess
+    private fun abortPipe() {
+        replies.close()
+        commands.close()
     }
 
     suspend fun play(
@@ -71,27 +90,33 @@ internal class RootGestureConnection private constructor(
             if (!usable) return TapResult.Unavailable("Root 触摸连接失效，请停止本次操作")
             if (volumeStopped) onVolumeDown?.invoke()
             if (stop() || volumeStopped) return TapResult.Cancelled
-            val command = gesture.strokes.joinToString(";") { "${it.point.x},${it.point.y},${it.startMs},${it.durationMs}" }
+            val strokes = gesture.strokes.map { RootStroke(it.point.x, it.point.y, it.startMs, it.durationMs) }
             outstanding = true
-            if (!send("PLAY $command")) return TapResult.Unavailable("Root 触摸命令写入失败")
+            if (!commands.send("PLAY ${RootSequenceProtocol.encodeStrokes(strokes)}")) {
+                return TapResult.Unavailable("Root 触摸命令写入失败")
+            }
             val timeout = gesture.strokes.maxOf { it.startMs + it.durationMs } + 1_500
             val reply = coroutineScope {
                 val watcher = launch {
-                    while (!stop()) delay(12)
-                    send("STOP")
+                    while (!stop() && !volumeStopped) delay(12)
+                    if (!commands.send("STOP")) abortPipe()
                 }
                 try { receive(timeout) } finally { watcher.cancel() }
             } ?: return TapResult.TimedOut
-            outstanding = false
-            val fields = reply.split(' ')
+            val fields = reply.split(' ', limit = 5)
             if (fields.size != 4 || fields[0] != "DONE") {
-                usable = false
                 return TapResult.Unavailable("Root 触摸响应无效，释放待确认")
             }
+            val down = fields[2].toLongOrNull()
+            val up = fields[3].toLongOrNull()
+            if (down == null || up == null || (fields[1] == "OK" && (down < 0 || up < down))) {
+                return TapResult.Unavailable("Root 触摸时间响应无效，释放待确认")
+            }
+            outstanding = false
             val outcome = RootTouchOutcome(
                 fields[1],
-                fields[2].toLongOrNull()?.takeIf { it >= 0 },
-                fields[3].toLongOrNull()?.takeIf { it >= 0 },
+                down.takeIf { it >= 0 },
+                up.takeIf { it >= 0 },
             )
             if (volumeStopped) onVolumeDown?.invoke()
             onOutcome(outcome)
@@ -105,17 +130,16 @@ internal class RootGestureConnection private constructor(
                 }
             }
         } finally {
-            if (outstanding) withContext(NonCancellable) {
-                usable = false
-                send("STOP")
-                receive(CLEANUP_TIMEOUT_MS)
-            }
-            gate.unlock()
+            try {
+                if (outstanding) withContext(NonCancellable) {
+                    usable = false
+                    abortPipe()
+                }
+            } finally { gate.unlock() }
         }
     }
 
-
-    /** Sends the complete note timeline once; the privileged helper controls all DOWN/UP deadlines. */
+    /** Sends one acknowledged block at a time. Only a completely uploaded plan can start. */
     internal suspend fun playSequence(
         steps: List<RootSequenceStep>,
         stop: () -> Boolean,
@@ -124,151 +148,223 @@ internal class RootGestureConnection private constructor(
         onPaused: () -> Unit,
         onResumed: () -> Unit,
         onStarted: (Long) -> Unit = {},
+        beforeResume: suspend () -> Boolean = { true },
+        onTiming: (Int, Long, Long, Long) -> Unit = { _, _, _, _ -> },
     ): ContinuousPlaybackResult {
         if (!gate.tryLock()) return ContinuousPlaybackResult(0, TapResult.Busy)
         var outstanding = false
         try {
             if (!usable) return ContinuousPlaybackResult(0, TapResult.Unavailable("Root 输入连接已失效"))
-            if (steps.isEmpty() || steps.size > 100_000) return ContinuousPlaybackResult(0, TapResult.Unavailable("连续演奏音符数量无效"))
+            if (steps.size !in 1..RootSequenceProtocol.MAX_NOTES) {
+                return ContinuousPlaybackResult(0, TapResult.Unavailable("连续演奏音符数量无效"))
+            }
             if (stop() || volumeStopped) return ContinuousPlaybackResult(0, TapResult.Cancelled)
-            val sent = withContext(Dispatchers.IO) {
-                runCatching {
-                    synchronized(commands) {
-                        commands.write("QUEUE ${steps.size}")
-                        commands.newLine()
-                        for (step in steps) {
-                            val strokes = step.strokes.joinToString(";") {
-                                "${it.x},${it.y},${it.startMs},${it.durationMs}"
-                            }
-                            commands.write("ITEM ${step.noteAtMs}|$strokes")
-                            commands.newLine()
-                        }
-                        commands.write("RUN")
-                        commands.newLine()
-                        commands.flush()
-                    }
-                }.isSuccess
-            }
+            val id = ++nextSequence
+            activeSequence.set(id)
             outstanding = true
-            if (!sent) {
-                usable = false
-                return ContinuousPlaybackResult(0, TapResult.Unavailable("连续触控计划发送失败"))
+
+            suspend fun sendAndAck(command: String, expected: Int): TapResult? {
+                if (!commands.send("SEQ $id $command")) return TapResult.Unavailable("连续触控计划发送失败")
+                val reply = receive(RootSequenceProtocol.ACK_TIMEOUT_MS)
+                return when (reply) {
+                    "SEQ $id ACK $expected" -> null
+                    "SEQ $id END STOPPED 0" -> TapResult.Cancelled
+                    "SEQ $id END FAILED 0" -> TapResult.Unavailable("Root 触控计划未通过校验")
+                    else -> TapResult.Unavailable("Root 触控计划确认丢失或顺序错误")
+                }
             }
-            var observed = 0
-            var origin: Long? = null
-            var maxLatenessMs = 0L
-            var end: ContinuousPlaybackResult? = null
-            val finished = coroutineScope {
-                val watcher = launch {
-                    var lastPause = false
-                    while (true) {
-                        if (stop() || volumeStopped) {
-                            send("STOP")
+
+            sendAndAck("QUEUE ${steps.size}", 0)?.let {
+                return ContinuousPlaybackResult(0, it)
+            }
+            var first = 0
+            while (first < steps.size && !stop() && !volumeStopped) {
+                val last = minOf(first + RootSequenceProtocol.CHUNK_SIZE, steps.size)
+                val payload = steps.subList(first, last).joinToString("~", transform = RootSequenceProtocol::encode)
+                sendAndAck("BLOCK $first $payload", last)?.let { return ContinuousPlaybackResult(0, it) }
+                first = last
+            }
+            if (stop() || volumeStopped) {
+                val sent = commands.send("SEQ $id STOP")
+                outstanding = !sent || receive(RootSequenceProtocol.ACK_TIMEOUT_MS) != "SEQ $id END STOPPED 0"
+                return ContinuousPlaybackResult(0, TapResult.Cancelled)
+            }
+            val initialPause = pause()
+            if (!commands.send("SEQ $id RUN ${if (initialPause) 1 else 0}")) {
+                return ContinuousPlaybackResult(0, TapResult.Unavailable("Root 连续调度启动失败"))
+            }
+            val result = receiveSequence(id, steps.size, initialPause, stop, pause,
+                onNote, onPaused, onResumed, onStarted, beforeResume, onTiming)
+            outstanding = !result.terminal
+            if (result.playback.result is TapResult.Unavailable) usable = false
+            return result.playback
+        } finally {
+            activeSequence.set(0)
+            try {
+                if (outstanding) {
+                    usable = false
+                    // EOF cancels partial uploads and stops a worker even after its acknowledgments were lost.
+                    abortPipe()
+                }
+            } finally { gate.unlock() }
+        }
+    }
+
+    private data class SequenceReceipt(val playback: ContinuousPlaybackResult, val terminal: Boolean)
+
+    private suspend fun receiveSequence(
+        id: Long,
+        noteCount: Int,
+        initialPause: Boolean,
+        stop: () -> Boolean,
+        pause: () -> Boolean,
+        onNote: (Int, Long?, Long?) -> Unit,
+        onPaused: () -> Unit,
+        onResumed: () -> Unit,
+        onStarted: (Long) -> Unit,
+        beforeResume: suspend () -> Boolean,
+        onTiming: (Int, Long, Long, Long) -> Unit,
+    ): SequenceReceipt = coroutineScope {
+        val helperPaused = AtomicBoolean()
+        val resumeDenied = AtomicBoolean()
+        val lastControlNanos = AtomicLong(System.nanoTime())
+        lastPongNanos.set(System.nanoTime())
+        val heartbeats = launch(Dispatchers.IO) {
+            while (true) {
+                delay(500)
+                val now = System.nanoTime()
+                if (now - lastPongNanos.get() > TimeUnit.SECONDS.toNanos(4) ||
+                    now - lastControlNanos.get() > TimeUnit.SECONDS.toNanos(1) ||
+                    !commands.send("SEQ $id PING")) {
+                    abortPipe()
+                    break
+                }
+            }
+        }
+        val controls = launch {
+            var desiredSent = initialPause
+            var validation: Deferred<Boolean>? = null
+            suspend fun requestStop() {
+                validation?.cancel()
+                if (!commands.send("SEQ $id STOP")) {
+                    abortPipe()
+                    return
+                }
+                delay(RootSequenceProtocol.ACK_TIMEOUT_MS)
+                abortPipe()
+            }
+            while (true) {
+                lastControlNanos.set(System.nanoTime())
+                if (stop() || volumeStopped) {
+                    requestStop()
+                    break
+                }
+                if (pause()) {
+                    validation?.cancel()
+                    validation = null
+                    if (!desiredSent) {
+                        if (!commands.send("SEQ $id PAUSE")) { abortPipe(); break }
+                        desiredSent = true
+                    }
+                } else if (desiredSent && helperPaused.get()) {
+                    val check = validation ?: async {
+                        try { beforeResume() }
+                        catch (e: CancellationException) { throw e }
+                        catch (_: Exception) { false }
+                    }.also { validation = it }
+                    if (check.isCompleted) {
+                        if (!check.await()) {
+                            resumeDenied.set(true)
+                            requestStop()
                             break
                         }
-                        val desired = pause()
-                        if (desired != lastPause) {
-                            if (!send(if (desired) "PAUSE" else "RESUME")) break
-                            lastPause = desired
-                        }
-                        delay(12)
+                        if (!commands.send("SEQ $id RESUME")) { abortPipe(); break }
+                        desiredSent = false
+                        validation = null
                     }
                 }
-                try {
-                    var missed = 0
-                    while (end == null) {
-                        val message = receive(1_000)
-                        if (message == null) {
-                            if (!process.isAlive || ++missed >= 4 || !send("PING")) break
-                            continue
-                        }
-                        missed = 0
-                        when {
-                            message == "PONG" -> Unit
-                            message == "PAUSED" -> onPaused()
-                            message == "RESUMED" -> onResumed()
-                            message.startsWith("START ") -> {
-                                if (origin != null) break
-                                val time = message.removePrefix("START ").toLongOrNull()
-                                if (time == null || time < 0) break
-                                origin = time
-                                onStarted(time)
-                            }
-                            message.startsWith("EVENT ") -> {
-                                val parts = message.split(' ')
-                                val index = parts.getOrNull(1)?.toIntOrNull()
-                                if (parts.size != 5 || index != observed) break
-                                if (parts[2] == "OK") {
-                                    val down = parts[3].toLongOrNull()
-                                    val up = parts[4].toLongOrNull()
-                                    if (down == null || up == null || down < 0 || up < down) break
-                                    val began = origin ?: break
-                                    maxLatenessMs = maxOf(maxLatenessMs, (down - began - steps[index].noteAtMs).coerceAtLeast(0L))
-                                    onNote(index, down, up)
-                                    observed++
-                                } else if (parts[2] !in setOf("STOPPED", "FAILED", "UNCONFIRMED")) break
-                            }
-                            message.startsWith("END ") -> {
-                                val parts = message.split(' ')
-                                val count = parts.getOrNull(2)?.toIntOrNull()
-                                if (parts.size != 3 || count != observed) break
-                                end = ContinuousPlaybackResult(count, when(parts[1]) {
-                                    "OK" -> if (count == steps.size) TapResult.Completed else TapResult.Unavailable("Root 提前结束")
-                                    "STOPPED" -> TapResult.Cancelled
-                                    "FAILED" -> TapResult.Rejected
-                                    else -> TapResult.Unavailable("Root 释放状态待确认")
-                                }, maxLatenessMs)
-                            }
-                            else -> break
+                delay(12)
+            }
+        }
+        var observed = 0
+        var origin: Long? = null
+        var failedEvent: String? = null
+        var maxLatenessMs = 0L
+        try {
+            val prefix = "SEQ $id "
+            for (message in replies) {
+                if (!message.startsWith(prefix)) break
+                val parts = message.removePrefix(prefix).split(' ', limit = 8)
+                when (parts[0]) {
+                    "PAUSED" -> {
+                        if (parts.size != 1 || origin == null || !helperPaused.compareAndSet(false, true)) break
+                        onPaused()
+                    }
+                    "RESUMED" -> {
+                        if (parts.size != 1 || origin == null || !helperPaused.compareAndSet(true, false)) break
+                        onResumed()
+                    }
+                    "START" -> {
+                        if (parts.size != 2 || origin != null) break
+                        val time = parts[1].toLongOrNull()?.takeIf { it >= 0 } ?: break
+                        origin = time
+                        onStarted(time)
+                    }
+                    "EVENT" -> {
+                        if (parts.size != 6 || observed >= noteCount || parts[1].toIntOrNull() != observed ||
+                            failedEvent != null || helperPaused.get()) break
+                        val began = origin ?: break
+                        val planned = parts[3].toLongOrNull()?.takeIf { it >= began } ?: break
+                        val down = parts[4].toLongOrNull() ?: break
+                        val up = parts[5].toLongOrNull() ?: break
+                        if (parts[2] == "OK") {
+                            if (down < planned || up < down) break
+                            maxLatenessMs = maxOf(maxLatenessMs, down - planned)
+                            onTiming(observed, planned, down, up)
+                            onNote(observed, down, up)
+                            observed++
+                        } else {
+                            if (parts[2] !in listOf("STOPPED", "FAILED", "UNCONFIRMED", "LATE")) break
+                            failedEvent = parts[2]
                         }
                     }
-                    end
-                } finally { watcher.cancel() }
+                    "END" -> {
+                        if (parts.size != 3 || parts[2].toIntOrNull() != observed) break
+                        val status = parts[1]
+                        if (failedEvent != null && status != failedEvent) break
+                        val result = when (status) {
+                            "OK" -> if (origin != null && observed == noteCount) TapResult.Completed else break
+                            "STOPPED" -> if (resumeDenied.get()) TapResult.Unavailable("恢复前无法确认游戏环境或控制状态")
+                                else TapResult.Cancelled
+                            "FAILED" -> TapResult.Rejected
+                            "LATE" -> TapResult.Unavailable("Root 触控超过允许的迟到时间，已停止后续音符")
+                            "UNCONFIRMED" -> TapResult.Unavailable("Root 释放状态待确认")
+                            else -> break
+                        }
+                        return@coroutineScope SequenceReceipt(ContinuousPlaybackResult(observed, result, maxLatenessMs), true)
+                    }
+                    else -> break
+                }
             }
-            if (finished != null) {
-                outstanding = false
-                if (finished.result is TapResult.Unavailable) usable = false
-                return finished
-            }
-            usable = false
-            return ContinuousPlaybackResult(observed, TapResult.Unavailable("Root 连续调度通信中断或响应无效"))
+            SequenceReceipt(ContinuousPlaybackResult(observed,
+                TapResult.Unavailable("Root 连续调度通信中断或响应无效"), maxLatenessMs), false)
         } finally {
-            if (outstanding) withContext(NonCancellable) {
-                usable = false
-                send("STOP")
-                receive(CLEANUP_TIMEOUT_MS)
-            }
-            gate.unlock()
+            heartbeats.cancel()
+            controls.cancel()
         }
     }
 
     private suspend fun receive(timeoutMs: Long): String? =
         withTimeoutOrNull(timeoutMs) { replies.receiveCatching().getOrNull() }
 
-    /** EOF asks the helper to finish release before it acknowledges shutdown. */
+    /** EOF requests worker termination. Only the terminal message confirms cleanup. */
     suspend fun close(): RootCleanup = withContext(NonCancellable) {
-        withContext(Dispatchers.IO) { runCatching { commands.close() } }
-        val outcome = withTimeoutOrNull(CLEANUP_TIMEOUT_MS) {
-            var reply = replies.receiveCatching().getOrNull()
-            while (reply != null && (reply.startsWith("DONE ") || reply.startsWith("EVENT ") ||
-                        reply.startsWith("END ") || reply.startsWith("START ") ||
-                        reply in setOf("PONG", "PAUSED", "RESUMED")))
-                reply = replies.receiveCatching().getOrNull()
-            when (reply) {
-                "CLOSED" -> RootCleanup.ACKNOWLEDGED
-                "UNCONFIRMED" -> RootCleanup.REJECTED
-                else -> RootCleanup.NO_ACK
-            }
-        } ?: RootCleanup.NO_ACK
-        // If injection is still in flight, let the helper process STOP/EOF when it returns.
-        if (outcome != RootCleanup.NO_ACK) withContext(Dispatchers.IO) {
-            runCatching { process.waitFor(200, java.util.concurrent.TimeUnit.MILLISECONDS) }
-        }
-        outcome
+        commands.close()
+        withTimeoutOrNull(RootSequenceProtocol.ACK_TIMEOUT_MS) { shutdown.await() } ?: RootCleanup.NO_ACK
     }
 
     companion object {
-        private const val CLEANUP_TIMEOUT_MS = 1_200L
+        private const val TAG = "DeltaRoot"
 
         suspend fun open(apk: String, targetUid: Int, onVolumeDown: (() -> Unit)?): RootGestureConnection? {
             val volumeArgument = if (onVolumeDown != null) " volume" else ""
@@ -282,7 +378,7 @@ internal class RootGestureConnection private constructor(
                         onVolumeDown,
                     )
                 }
-                connected = connection?.receive(3_000) == "READY 0"
+                connected = connection?.receive(3_000) == "READY ${RootSequenceProtocol.VERSION}"
                 return connection?.takeIf { connected }
             } catch (_: IOException) {
                 return null
@@ -293,4 +389,57 @@ internal class RootGestureConnection private constructor(
             }
         }
     }
+}
+
+/** Bounded writer: a stuck OS pipe cannot suspend the caller or its stop watcher indefinitely. */
+private class RootCommandPipe(private val stream: OutputStream) {
+    private data class Command(val text: String, val sent: CompletableDeferred<Boolean>)
+
+    private val pending = ArrayBlockingQueue<Command>(4)
+    private val closed = AtomicBoolean()
+
+    init {
+        Thread({
+            val writer = stream.bufferedWriter()
+            try {
+                while (!closed.get()) {
+                    val command = pending.poll(25L, TimeUnit.MILLISECONDS) ?: continue
+                    if (closed.get()) {
+                        command.sent.complete(false)
+                        break
+                    }
+                    try {
+                        writer.write(command.text)
+                        writer.newLine()
+                        writer.flush()
+                        command.sent.complete(true)
+                    } catch (_: IOException) {
+                        command.sent.complete(false)
+                        break
+                    }
+                }
+            } finally {
+                closed.set(true)
+                runCatching { stream.close() }
+                while (true) {
+                    val abandoned = pending.poll() ?: break
+                    abandoned.sent.complete(false)
+                }
+            }
+        }, "DeltaRootCommands").apply { isDaemon = true; start() }
+    }
+
+    suspend fun send(text: String): Boolean {
+        if (closed.get()) return false
+        val sent = CompletableDeferred<Boolean>()
+        if (!pending.offer(Command(text, sent))) {
+            close()
+            return false
+        }
+        val confirmed = withTimeoutOrNull(RootSequenceProtocol.ACK_TIMEOUT_MS) { sent.await() } == true
+        if (!confirmed) close()
+        return confirmed
+    }
+
+    fun close() { closed.set(true) }
 }

@@ -37,6 +37,7 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
     fun requestResume() { pause.set(false) }
     fun requestStop() { stop.set(true) }
     internal val stopRequested: Boolean get() = stop.get()
+    internal fun continuousStarted(helperUptimeMs: Long) { startedAt = helperUptimeMs }
     suspend fun run(plan: PlaybackPlan, hide: () -> Unit, awaitWindows: suspend () -> Unit, valid: () -> Boolean,
                     dispatch: suspend (String,Long) -> TapResult, restore: () -> Unit,
                     onPhase: (PlaybackPhase) -> Unit = {}, dryRunCompleted: Boolean = false, warningsConfirmed: Boolean = false,
@@ -101,7 +102,7 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
             if (!valid()) failure="显示环境或无障碍服务已变化"
             else {
                 val start = nowMs()
-                startedAt = start
+                if (dispatchContinuous == null) startedAt = start
                 onSessionStarted(start)
                 onPhase(PlaybackPhase.RUNNING)
                 if (dispatchContinuous != null) {

@@ -138,7 +138,7 @@ class RootSequenceTimelineTest {
             },
             onNote = { _, _ -> },
         )
-        assertEquals("FAILED", result.status)
+        assertEquals("LATE", result.status)
         assertEquals(0, result.completed)
         assertEquals(0, injected)
     }

@@ -1,11 +1,17 @@
 package com.huanhren.deltaharmonica.input
 
-/** One playable note and its (optional) simultaneous region/semitone controls. */
-internal data class RootSequenceStep(val noteAtMs: Long, val strokes: List<RootStroke>) {
+/** One playable note with the ordered control strokes that must precede its DOWN. */
+internal data class RootSequenceStep(
+    val noteAtMs: Long,
+    val strokes: List<RootStroke>,
+    val minGapMs: Long = 0,
+    val maxLatenessMs: Long = 40,
+) {
     init {
         require(noteAtMs >= 0)
         require(strokes.size in 1..3)
         require(strokes.last().startMs <= noteAtMs)
+        require(minGapMs in 0..500 && maxLatenessMs in 1..500)
     }
 }
 
@@ -29,18 +35,22 @@ internal object RootSequenceTimeline {
         playGesture: (List<RootStroke>) -> RootTouchOutcome,
         onNote: (Int, RootTouchOutcome) -> Unit,
         onStarted: (Long) -> Unit = {},
+        playTimedGesture: ((RootSequenceStep, Long) -> RootTouchOutcome)? = null,
+        onScheduledNote: (Int, RootTouchOutcome, Long) -> Unit = { _, _, _ -> },
     ): RootSequenceOutcome {
         require(steps.isNotEmpty())
         val origin = now()
         onStarted(origin)
         var pauseShift = 0L
         var completed = 0
+        var releasedAt: Long? = null
         for ((index, step) in steps.withIndex()) {
             val startAt = origin + step.noteAtMs - step.strokes.last().startMs
+            val nextSafeDown = releasedAt?.plus(step.minGapMs) ?: origin
             try {
                 var pausedHere: Long
                 do {
-                    pausedHere = waitFor(startAt + pauseShift)
+                    pausedHere = waitFor(maxOf(startAt + pauseShift, nextSafeDown))
                     pauseShift += pausedHere
                 } while (pausedHere > 0L)
             } catch (_: InterruptedException) {
@@ -49,13 +59,16 @@ internal object RootSequenceTimeline {
                 return RootSequenceOutcome("FAILED", completed)
             }
             // Never turn a stalled game/input dispatcher into a fast burst of stale notes.
-            if (now() - (startAt + pauseShift) > 2_000L)
-                return RootSequenceOutcome("FAILED", completed)
+            val plannedStart = startAt + pauseShift
+            if (now() - plannedStart > step.maxLatenessMs)
+                return RootSequenceOutcome("LATE", completed)
             val outcome = try {
-                playGesture(step.strokes)
+                playTimedGesture?.invoke(step, plannedStart) ?: playGesture(step.strokes)
             } catch (_: Exception) {
                 return RootSequenceOutcome("UNCONFIRMED", completed)
             }
+            releasedAt = now()
+            onScheduledNote(index, outcome, origin + step.noteAtMs + pauseShift)
             onNote(index, outcome)
             if (!outcome.completed) return RootSequenceOutcome(outcome.status, completed)
             completed++

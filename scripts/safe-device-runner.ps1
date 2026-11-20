@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$HostSha256,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$TestSha256,
     [switch]$Execute,
-    [switch]$LiveOnlineLibrary
+    [switch]$LiveOnlineLibrary,
+    [switch]$RootContinuous
 )
 
 $ErrorActionPreference = 'Stop'
@@ -179,6 +180,11 @@ try {
             $classes += 'OnlineLibraryLiveDeviceSmokeTest'
             $expectedCount += 2
             $liveArguments = @('-e','liveOnlineLibrary','true')
+        }
+        if ($RootContinuous) {
+            $classes += 'RootContinuousDeviceTest'
+            $expectedCount += 3
+            $liveArguments += @('-e','rootContinuous','true')
         }
         $selection = ($classes | ForEach-Object { "com.huanhren.deltaharmonica.$_" }) -join ','
         $run = @(Invoke-PinnedAdb ($route + @('shell','am','instrument','--user','0','-w','-r','-e','class',$selection) + $liveArguments + @("$($script:IsolatedTestId)/$runner")) 'instrumentation')

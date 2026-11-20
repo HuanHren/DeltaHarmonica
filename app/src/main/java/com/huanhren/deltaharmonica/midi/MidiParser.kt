@@ -7,7 +7,11 @@ import kotlinx.serialization.Serializable
 
 @Serializable data class TimeSignaturePoint(val tick: Long, val numerator: Int, val denominator: Int)
 @Serializable data class TempoPoint(val tick: Long, val microsecondsPerQuarter: Int)
-data class MidiTrackInfo(val name: String, val notes: List<MidiNote>)
+data class MidiTrackInfo(
+    val name: String,
+    val notes: List<MidiNote>,
+    val noteOnCount: Int = notes.size,
+)
 data class ParsedMidi(val format: Int, val ppq: Int, val tracks: List<MidiTrackInfo>, val tempos: List<TempoPoint>, val durationMs: Long, val warnings: List<String>, val timeSignatures: List<TimeSignaturePoint> = emptyList(), val importStatus: ImportStatus = ImportStatus.CLEAN, val requiresConfirmation: Boolean = false, val diagnostics: List<ImportDiagnostic> = emptyList())
 object MidiParser {
     private const val MAX_BYTES = 2_000_000
@@ -71,6 +75,7 @@ object MidiParser {
         data class Start(val tick: Long, val velocity: Int)
         val open = HashMap<NoteKey, ArrayDeque<Start>>()
         val tracks = List(names.size) { mutableListOf<MidiNote>() }
+        val noteOnCounts = IntArray(names.size)
         val warnings = mutableListOf<String>()
         var roundedShortNotes = 0
         var lastNoteEnd = 0L
@@ -79,8 +84,10 @@ object MidiParser {
             if (code != 0x80 && code != 0x90) continue
             require(e.a in 0..127 && e.b in 0..127) { "音符数据超出 MIDI 范围" }
             val key = NoteKey(e.track, channel, e.a)
-            if (code == 0x90 && e.b > 0) open.getOrPut(key) { ArrayDeque() }.addLast(Start(e.tick, e.b))
-            else {
+            if (code == 0x90 && e.b > 0) {
+                noteOnCounts[e.track]++
+                open.getOrPut(key) { ArrayDeque() }.addLast(Start(e.tick, e.b))
+            } else {
                 val started = open[key]
                 val start = started?.removeFirstOrNull()
                 if (start == null) { if (warnings.size < 100) warnings.add("未匹配的 Note Off：轨道 ${e.track+1} 音高 ${e.a}"); continue }
@@ -101,7 +108,7 @@ object MidiParser {
         val unmatched = open.values.sumOf { it.size }
         if (unmatched > 0) warnings.add("$unmatched 个 Note On 缺少 Note Off")
         val duration = maxOf(lastNoteEnd, all.lastOrNull()?.let { clock.millisecondsAt(it.tick) } ?: 0L)
-        return ParsedMidi(format, ppq, tracks.mapIndexed { i, n -> MidiTrackInfo(names[i], n.sortedBy { it.startMs }) }, tempos,
+        return ParsedMidi(format, ppq, tracks.mapIndexed { i, n -> MidiTrackInfo(names[i], n.sortedBy { it.startMs }, noteOnCounts[i]) }, tempos,
             duration, warnings, signatures)
     }
 }

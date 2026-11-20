@@ -40,6 +40,11 @@ class OnlineSongConverterTest {
         assertEquals(-48, output.script.transpose)
         assertEquals(listOf(60), output.script.events.map { it.midiNote })
         assertEquals(1, output.script.provenance?.unmappedCount)
+        assertEquals(2, output.compatibility.sourceNoteCount)
+        assertEquals(2, output.compatibility.parsedNoteCount)
+        assertEquals(2, output.compatibility.retainedSourceNoteCount)
+        assertEquals(0, output.compatibility.overlapDroppedNoteCount)
+        assertEquals(1, output.compatibility.playableNoteCount)
         assertTrue(output.warnings.any { it.contains("已省略") })
         assertEquals(output.script, ScriptCodec.decode(ScriptCodec.encode(output.script)))
     }

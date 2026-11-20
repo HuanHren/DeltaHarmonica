@@ -18,6 +18,7 @@ import com.huanhren.deltaharmonica.input.RootBackend
 import com.huanhren.deltaharmonica.input.RootCommandRunner
 import com.huanhren.deltaharmonica.input.RootManagerKind
 import com.huanhren.deltaharmonica.input.RootPermissionManager
+import com.huanhren.deltaharmonica.input.RootReleaseGuard
 import com.huanhren.deltaharmonica.input.ShizukuBackend
 import com.huanhren.deltaharmonica.input.SuCommandRunner
 import com.huanhren.deltaharmonica.input.displaySnapshot
@@ -88,7 +89,8 @@ open class DeltaHarmonicaApp : Application() {
         val runner = createRootRunner()
         val persistence = AndroidRootAuthorization(this)
         val authorization = RootPermissionManager(runner, persistence::detect, persistence, allowed = rootUiAllowed)
-        RootBackend(runner, apk, Process.myUid(), authorization) { displaySnapshot(this).size }
+        val releaseGuard = if (rootUiAllowed) RootReleaseGuard(this) else null
+        RootBackend(runner, apk, Process.myUid(), authorization, releaseGuard) { displaySnapshot(this).size }
     }
     val backends by lazy { listOf(rootBackend, accessibilityBackend, ShizukuBackend()) }
 }

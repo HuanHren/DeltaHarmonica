@@ -4,6 +4,37 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RootTouchTimelineTest {
+    @Test fun continuousControlReleaseMustSettleBeforeNoteEvenWhenInjectionTakesTime() {
+        var clock = 100L
+        val steps = listOf(RootStroke(1f, 1f, 0, 40), RootStroke(2f, 2f, 70, 50))
+        val times = mutableListOf<Long>()
+        val result = RootTouchTimeline.play(
+            steps, { clock }, { clock = maxOf(clock, it) },
+            scheduledStartMs = 100L, maxDownLatenessMs = 40L, sequential = true,
+        ) { kind, id, _, _, time ->
+            times.add(time)
+            if (id == 0 && kind == RootTouchKind.UP) clock += 18
+            true
+        }
+        assertTrue(result.completed)
+        assertEquals(listOf(100L, 140L, 188L, 238L), times)
+    }
+
+    @Test fun continuousNoteIsNotInjectedWhenControlReleaseStalls() {
+        var clock = 100L
+        val actions = mutableListOf<Pair<Int, RootTouchKind>>()
+        val result = RootTouchTimeline.play(
+            listOf(RootStroke(1f, 1f, 0, 40), RootStroke(2f, 2f, 70, 50)),
+            { clock }, { clock = maxOf(clock, it) },
+            scheduledStartMs = 100L, maxDownLatenessMs = 40L, sequential = true,
+        ) { kind, id, _, _, _ ->
+            actions.add(id to kind)
+            if (kind == RootTouchKind.UP) clock += 60
+            true
+        }
+        assertEquals("LATE", result.status)
+        assertEquals(listOf(0 to RootTouchKind.DOWN, 0 to RootTouchKind.UP), actions)
+    }
     @Test fun overlappingControlsKeepNoteHeldAndPreservePointerIds() {
         val fixture = Fixture()
         val result = fixture.play(listOf(

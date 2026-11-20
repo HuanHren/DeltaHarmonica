@@ -18,6 +18,16 @@ class FocusedWindowTest {
         assertFalse(FocusedWindow.isFreshGame("com.other",1000,1100))
         assertFalse(FocusedWindow.isFreshGame(null,1000,1100))
     }
+
+    @Test fun samePackageWindowsHaveDifferentIdentities() {
+        val first = "  mCurrentFocus=Window{abc u0 com.tencent.tmgp.dfm/.GameActivity}"
+        val second = "  mCurrentFocus=Window{def u0 com.tencent.tmgp.dfm/.GameActivity}"
+        val observed = FocusedWindow.parseIdentity(first)
+        assertEquals(FocusedWindow.Identity("com.tencent.tmgp.dfm", "abc", 0), observed)
+        assertNotEquals(observed, FocusedWindow.parseIdentity(second))
+        assertNull(FocusedWindow.parseIdentity("$first\n$second"))
+        assertEquals(observed, FocusedWindow.parseIdentity("$first\nmCurrentFocus=null"))
+    }
     @Test fun rootFocusQueryIsReadOnlyAndRequiresAuthorization() = runBlocking {
         val commands=mutableListOf<String>()
         val runner=RootCommandRunner { command,_ ->

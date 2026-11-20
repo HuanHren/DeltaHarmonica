@@ -42,6 +42,9 @@
     <string name="overlay_completed_restored">演奏已完成，浮窗已恢复</string>
     <string name="overlay_completed_check">演奏已完成，请检查浮窗</string>
     <string name="overlay_stopped_restored">演奏已停止，浮窗已恢复</string>
+    <string name="session_root_confirm_resume">请核对游戏状态：音区 %1$s，半音 %2$s。相符时再次点击继续。如已改变，请停止并重新同步。</string>
+    <string name="session_semitone_on">开启</string>
+    <string name="session_semitone_off">关闭</string>
     <string name="overlay_stopped_check">演奏已停止，请检查浮窗</string>
     <string name="overlay_wait_cancelled">已取消等待，未发送触摸</string>
     <string name="overlay_interrupted">演奏中断，请检查游戏与浮窗</string>

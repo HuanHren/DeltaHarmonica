@@ -6,6 +6,40 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PlaybackPlanTest {
+    @Test fun rootRejectsExtremeStretchDuringPreflight() {
+        val song = script().copy(events = List(100) { index ->
+            ScriptEvent(index.toLong(), 1L, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 100, 2.0, rootTiming = RootPlaybackTiming())
+        assertEquals(100, plan.events.size)
+        assertTrue(plan.fatalErrors.any { it.contains("降低倍速") })
+    }
+    @Test fun rootSchedulesRegionThenSemitoneBeforeFirstNote() {
+        val timing = RootPlaybackTiming()
+        val plan = PlaybackPlanner.plan(script(), layout, Region.LOW, true, 0, 8, 1.0, rootTiming = timing)
+        assertTrue(plan.fatalErrors.isEmpty())
+        assertEquals(2 * timing.controlSlotMs, plan.events.first().predictedStartMs)
+        assertEquals(1, plan.regionSwitches)
+        assertEquals(1, plan.semitoneSwitches)
+        assertTrue(plan.events.drop(1).none { it.regionSwitch || it.semitoneSwitch })
+    }
+
+    @Test fun rootShortensSustainsToKeepTheBeatButReportsUnavoidableDelay() {
+        val timing = RootPlaybackTiming()
+        val song = script().copy(events = listOf(0L to 100L, 100L to 50L, 150L to 100L, 500L to 100L).map { (start, hold) ->
+            ScriptEvent(start, hold, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 4, 1.0, rootTiming = timing)
+        assertTrue(plan.fatalErrors.joinToString(), plan.fatalErrors.isEmpty())
+        assertEquals(0L, plan.events[0].predictedStartMs)
+        val gap = timing.plannedGap(sameKey = true, setupMs = 0L)
+        assertEquals(100L - gap, plan.events[0].predictedEndMs)
+        assertEquals(100L, plan.events[1].predictedStartMs)
+        assertEquals(100L + timing.minNoteHoldMs + gap, plan.events[2].predictedStartMs)
+        assertEquals(500L, plan.events[3].predictedStartMs)
+        assertEquals(2, plan.shortenedNotes)
+        assertTrue(plan.warnings.any { it.contains("时间预算不足") })
+    }
     @Test fun gestureOverheadIsBudgetedOnlyWhenTheOriginalTimelineHasNoRoom() {
         val dense = script().copy(events=(0..2).map { ScriptEvent(it*100L,100,62,"NOTE_2",Region.NATURAL,false) })
         val plan=PlaybackPlanner.plan(dense,layout,Region.NATURAL,false,0,3,1.0,gestureOverheadMs=30)

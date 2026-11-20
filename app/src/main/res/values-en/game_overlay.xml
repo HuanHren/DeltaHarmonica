@@ -45,6 +45,9 @@
     <string name="overlay_completed_restored">Playback complete. Overlay restored.</string>
     <string name="overlay_completed_check">Playback complete. Check the overlay.</string>
     <string name="overlay_stopped_restored">Playback stopped. Overlay restored.</string>
+    <string name="session_root_confirm_resume">Check the instrument: register %1$s, semitone %2$s. Tap Resume again if they match. If they changed, stop and resync.</string>
+    <string name="session_semitone_on">on</string>
+    <string name="session_semitone_off">off</string>
     <string name="overlay_stopped_check">Playback stopped. Check the overlay.</string>
     <string name="overlay_wait_cancelled">Cancelled before sending any touches</string>
     <string name="overlay_interrupted">Playback interrupted. Check the game and overlay.</string>
