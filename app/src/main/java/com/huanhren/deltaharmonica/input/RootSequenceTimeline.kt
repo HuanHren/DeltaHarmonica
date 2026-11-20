@@ -34,7 +34,7 @@ internal object RootSequenceTimeline {
         var pauseShift = 0L
         var completed = 0
         for ((index, step) in steps.withIndex()) {
-            val startAt = origin + step.noteAtMs - step.strokes.last().startMs + pauseShift
+            val startAt = origin + step.noteAtMs - step.strokes.last().startMs
             try {
                 var pausedHere: Long
                 do {
