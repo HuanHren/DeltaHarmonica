@@ -4,11 +4,15 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$TestSha256,
     [switch]$Execute,
     [switch]$LiveOnlineLibrary,
-    [switch]$RootContinuous
+    [switch]$RootContinuous,
+    [switch]$RootContinuousOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($RootContinuousOnly -and ($RootContinuous -or $LiveOnlineLibrary)) {
+    throw 'RootContinuousOnly is a standalone test selection'
+}
 . (Join-Path $PSScriptRoot 'apk-provenance.ps1')
 . (Join-Path $PSScriptRoot 'safe-device-input.ps1')
 
@@ -181,7 +185,11 @@ try {
             $expectedCount += 2
             $liveArguments = @('-e','liveOnlineLibrary','true')
         }
-        if ($RootContinuous) {
+        if ($RootContinuousOnly) {
+            $classes = @('RootContinuousDeviceTest')
+            $expectedCount = 3
+            $liveArguments = @('-e','rootContinuous','true')
+        } elseif ($RootContinuous) {
             $classes += 'RootContinuousDeviceTest'
             $expectedCount += 3
             $liveArguments += @('-e','rootContinuous','true')

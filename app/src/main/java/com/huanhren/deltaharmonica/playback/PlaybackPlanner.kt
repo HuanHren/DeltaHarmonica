@@ -10,7 +10,7 @@ data class PlannedEvent(val sourceIndex: Int, val requestedStartMs: Long, val pr
 data class PlaybackPlan(val events: List<PlannedEvent>, val regionSwitches: Int, val semitoneSwitches: Int,
     val estimatedTotalMs: Long, val warnings: List<String>, val fatalErrors: List<String>, val controlGestureMs: Long, val settlingMs: Long, val combined: Boolean = false,
     val minimumTouchMs: Long = 1, val extendedNotes: Int = 0, val combinedLeadMs: Long = 40, val gestureOverheadMs: Long = 30,
-    val rootTiming: RootPlaybackTiming? = null, val shortenedNotes: Int = 0)
+    val rootTiming: RootPlaybackTiming? = null, val shortenedNotes: Int = 0, val rootPreRollMs: Long = 0)
 object PlaybackPlanner {
     fun mappedEventCount(script: PerformanceScript, layout: InstrumentLayout): Int {
         val profile=layout.profile ?: return 0
@@ -89,6 +89,7 @@ object PlaybackPlanner {
         var delayedCount=0; var maxDelay=0L; var extendedNotes=0; var unverifiedShort=0
         var shortenedNotes = 0
         var shortenedMs = 0L
+        var preRoll = 0L
         val minHold = rootTiming?.minNoteHoldMs ?: minimumTouchMs
         val plans = ArrayList<PlannedEvent>(count)
         original.forEachIndexed { index, event ->
@@ -126,10 +127,12 @@ object PlaybackPlanner {
                 else -> (if (changeRegion) controlMs + settleMs + gestureOverheadMs else 0L) +
                     (if (changeSemi) controlMs + settleMs + gestureOverheadMs else 0L)
             }
+            if (rootTiming != null && index == 0) preRoll = before
+            val desired = requested + preRoll
             if (rootTiming != null && index > 0) {
                 val previous = plans.last()
                 val gap = rootTiming.plannedGap(previous.event.noteKeyId == e.noteKeyId, before)
-                val end = minOf(previous.predictedEndMs, maxOf(previous.predictedStartMs + minHold, requested - before - gap))
+                val end = minOf(previous.predictedEndMs, maxOf(previous.predictedStartMs + minHold, desired - before - gap))
                 if (end < previous.predictedEndMs) {
                     shortenedNotes++
                     shortenedMs += previous.predictedEndMs - end
@@ -137,8 +140,8 @@ object PlaybackPlanner {
                 }
                 cursor = end + gap
             }
-            val begin=maxOf(requested,cursor+before); val end=begin+duration.coerceAtMost(MAX_GESTURE_DURATION_MS)
-            if (begin>requested) { delayedCount++; maxDelay=maxOf(maxDelay,begin-requested) }
+            val begin=maxOf(desired,cursor+before); val end=begin+duration.coerceAtMost(MAX_GESTURE_DURATION_MS)
+            if (begin>desired) { delayedCount++; maxDelay=maxOf(maxDelay,begin-desired) }
             cursor = if (rootTiming != null) end
                 else (if (combined && (changeRegion || changeSemi)) maxOf(end,begin+80-combinedLeadMs) else end) + gestureOverheadMs
             currentRegion=e.pitchRegion; currentSemi=e.semitoneEnabled
@@ -147,7 +150,8 @@ object PlaybackPlanner {
         if (delayedCount > 0) warnings.add("时间预算不足：$delayedCount 个事件需延迟，最大预计延迟 $maxDelay ms；时间轴已拉伸")
         if (rootTiming != null) {
             val originalEnd = ((original.last().startTimeMs - base + original.last().durationMs) / speed).roundToLong()
-            val stretch = (cursor - originalEnd).coerceAtLeast(0L)
+            val stretch = (cursor - preRoll - originalEnd).coerceAtLeast(0L)
+            if (preRoll > 0) warnings.add("首音前预留 $preRoll ms 切换控制状态")
             if (stretch > 0L) warnings.add("Root 预计比所选速度的原谱延长 $stretch ms")
             if (stretch > maxOf(2_000L, originalEnd * 2L)) {
                 errors.add("当前速度的触控量超出时序预算，请降低倍速或换用较稀疏的曲谱")
@@ -160,6 +164,6 @@ object PlaybackPlanner {
         return PlaybackPlan(plans, nr, ns, cursor, warnings.distinct(), errors.distinct(),
             rootTiming?.controlHoldMs ?: controlMs, rootTiming?.let { it.controlSlotMs - it.controlHoldMs } ?: settleMs,
             combined, minHold, extendedNotes, combinedLeadMs, if (rootTiming == null) gestureOverheadMs else 0,
-            rootTiming, shortenedNotes)
+            rootTiming, shortenedNotes, preRoll)
     }
 }

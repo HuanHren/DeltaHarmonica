@@ -24,6 +24,18 @@ class PlaybackPlanTest {
         assertTrue(plan.events.drop(1).none { it.regionSwitch || it.semitoneSwitch })
     }
 
+    @Test fun rootUsesInitialControlTimeAsPreRollWithoutCompressingTheFirstBeat() {
+        val timing = RootPlaybackTiming()
+        val song = script().copy(events = listOf(0L, 330L).map {
+            ScriptEvent(it, 95L, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.LOW, true, 0, 2, 1.0, rootTiming = timing)
+        val preRoll = 2 * timing.controlSlotMs
+        assertEquals(preRoll, plan.rootPreRollMs)
+        assertEquals(listOf(preRoll, preRoll + 330L), plan.events.map { it.predictedStartMs })
+        assertEquals(0, plan.shortenedNotes)
+    }
+
     @Test fun rootShortensSustainsToKeepTheBeatButReportsUnavoidableDelay() {
         val timing = RootPlaybackTiming()
         val song = script().copy(events = listOf(0L to 100L, 100L to 50L, 150L to 100L, 500L to 100L).map { (start, hold) ->

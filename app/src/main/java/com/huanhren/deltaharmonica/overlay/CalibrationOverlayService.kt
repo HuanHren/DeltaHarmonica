@@ -1353,7 +1353,8 @@ class CalibrationOverlayService : Service() {
                     "songId=${app.model.midiWorkspace.songId ?: "unsaved"} source=${provenance?.sourceNoteCount} " +
                     "parsed=${provenance?.parsedNoteCount} retained=${provenance?.retainedSourceNoteCount} " +
                     "clipped=${provenance?.overlapClippedNoteCount} unmapped=${provenance?.unmappedCount} " +
-                    "converted=${prepared.script.events.size} planned=${fresh.events.size} speed=${prepared.speed} timing=$timing")
+                    "converted=${prepared.script.events.size} planned=${fresh.events.size} speed=${prepared.speed} " +
+                    "preRollMs=${fresh.rootPreRollMs} timing=$timing")
                 outcome = runner.run(fresh,
                     hide = {
                         removeMarkers()
@@ -1579,7 +1580,8 @@ class CalibrationOverlayService : Service() {
                                         down - rootOrigin, up - rootOrigin, sequence[index].strokes.last().startMs,
                                         duration, "Root 已派发",
                                     ))
-                                    rootMetrics?.record(planned, down, up, duration, item.predictedStartMs - item.requestedStartMs)
+                                    rootMetrics?.record(planned, down, up, duration,
+                                        item.predictedStartMs - item.requestedStartMs - fresh.rootPreRollMs)
                                     if (traceTouches) Log.d("DeltaRootTrace", "session=$sessionId index=${item.sourceIndex} " +
                                         "requested=${item.requestedStartMs} planned=$planned down=$down up=$up duration=$duration " +
                                         "pitch=${item.event.midiNote} sourcePitch=${item.event.midiNote - prepared.script.transpose} " +
