@@ -1469,6 +1469,7 @@ class CalibrationOverlayService : Service() {
                         if (sessionBar?.expanded == true) resizeSessionBar(false) else updateSessionBar()
                         verifySessionWindow()
                     }, dispatchContinuous = continuousSequence?.let { sequence ->
+                        var rootSequenceStarted: Long? = null
                         suspend fun runSequence(
                             onNote: (Int, Long?, Long?) -> Unit,
                             isPaused: () -> Boolean,
@@ -1480,8 +1481,9 @@ class CalibrationOverlayService : Service() {
                                 pause = isPaused,
                                 onNote = { index, down, up ->
                                     val item = fresh.events[index]
+                                    val rootOrigin = requireNotNull(rootSequenceStarted) { "Root 连续演奏未记录开始时间" }
                                     PlaybackPreparation.actualTimings[item.sourceIndex] = ActualTiming(
-                                        down - sessionStartMs, up?.minus(sessionStartMs),
+                                        down - rootOrigin, up?.minus(rootOrigin),
                                         if (item.regionSwitch || item.semitoneSwitch) fresh.combinedLeadMs else 0,
                                         item.predictedEndMs - item.predictedStartMs, "Root continuous OK",
                                     )
@@ -1493,6 +1495,7 @@ class CalibrationOverlayService : Service() {
                                 },
                                 onPaused = onPaused,
                                 onResumed = onResumed,
+                                onStarted = { rootSequenceStarted = it },
                             )
                         val execute: suspend (
                             (Int, Long?, Long?) -> Unit, () -> Boolean, () -> Unit, () -> Unit
