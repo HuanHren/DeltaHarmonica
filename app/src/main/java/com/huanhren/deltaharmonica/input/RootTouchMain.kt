@@ -28,6 +28,9 @@ object RootTouchMain {
         val busy = AtomicBoolean()
         val safe = AtomicBoolean(true)
         val volumeStopped = AtomicBoolean()
+        val paused = AtomicBoolean()
+        var queueCapacity = 0
+        val queued = ArrayList<RootSequenceStep>()
         fun reply(line: String) = System.out.println("DELTA $line")
         val volume = if (watchVolume) RootVolumeKeyMonitor.start {
             if (volumeStopped.compareAndSet(false, true)) {
@@ -43,7 +46,98 @@ object RootTouchMain {
                 when {
                     line == "STOP" -> {
                         stopped.set(true)
+                        paused.set(false)
                         worker.get()?.let(LockSupport::unpark)
+                    }
+                    line == "PAUSE" -> { paused.set(true); worker.get()?.let(LockSupport::unpark) }
+                    line == "RESUME" -> { paused.set(false); worker.get()?.let(LockSupport::unpark) }
+                    line == "PING" -> reply("PONG")
+                    line.startsWith("QUEUE ") && !busy.get() && safe.get() -> {
+                        val size = line.removePrefix("QUEUE ").toIntOrNull()
+                        queueCapacity = if (size != null && size in 1..100_000) size else 0
+                        queued.clear()
+                        if (queueCapacity == 0) reply("END FAILED 0")
+                    }
+                    line.startsWith("ITEM ") && !busy.get() && queueCapacity > 0 -> {
+                        val split = line.removePrefix("ITEM ").split('|', limit = 2)
+                        val at = split.firstOrNull()?.toLongOrNull()
+                        val strokes = split.getOrNull(1)?.let(::parse)
+                        if (at == null || at < 0 || strokes == null || queued.size >= queueCapacity ||
+                            (queued.isNotEmpty() && queued.last().noteAtMs > at)) {
+                            queueCapacity = 0
+                            queued.clear()
+                            reply("END FAILED 0")
+                        } else queued.add(RootSequenceStep(at, strokes))
+                    }
+                    line == "RUN" && !busy.get() && safe.get() -> {
+                        if (queueCapacity == 0 || queued.size != queueCapacity) {
+                            queueCapacity = 0
+                            queued.clear()
+                            reply("END FAILED 0")
+                        } else {
+                            val steps = queued.toList()
+                            queued.clear()
+                            queueCapacity = 0
+                            stopped.set(false)
+                            busy.set(true)
+                            val playback = Thread {
+                                fun waitUntil(deadline: Long) {
+                                    while (true) {
+                                        if (stopped.get() || volumeStopped.get()) throw InterruptedException()
+                                        val remaining = deadline - SystemClock.uptimeMillis()
+                                        if (remaining <= 0) return
+                                        LockSupport.parkNanos(minOf(remaining, 25L) * 1_000_000)
+                                    }
+                                }
+                                val result = RootSequenceTimeline.play(
+                                    steps,
+                                    SystemClock::uptimeMillis,
+                                    waitFor = { deadline ->
+                                        var pausedFor = 0L
+                                        while (true) {
+                                            if (stopped.get() || volumeStopped.get()) throw InterruptedException()
+                                            if (paused.get()) {
+                                                val from = SystemClock.uptimeMillis()
+                                                reply("PAUSED")
+                                                while (paused.get() && !stopped.get() && !volumeStopped.get())
+                                                    LockSupport.parkNanos(20_000_000)
+                                                if (stopped.get() || volumeStopped.get()) throw InterruptedException()
+                                                pausedFor += SystemClock.uptimeMillis() - from
+                                                reply("RESUMED")
+                                                break
+                                            }
+                                            val remaining = deadline - SystemClock.uptimeMillis()
+                                            if (remaining <= 0) break
+                                            LockSupport.parkNanos(minOf(remaining, 25L) * 1_000_000)
+                                        }
+                                        pausedFor
+                                    },
+                                    playGesture = { strokes ->
+                                        RootTouchTimeline.play(strokes, SystemClock::uptimeMillis, ::waitUntil) {
+                                                kind, id, pointers, down, time ->
+                                            val event = motion(kind, id, pointers, down, time)
+                                            try {
+                                                try { inject.invoke(manager, event, 1, targetUid) == true }
+                                                catch (e: InvocationTargetException) {
+                                                    when (e.targetException) {
+                                                        is SecurityException, is IllegalArgumentException -> throw RootDispatchDenied()
+                                                        else -> throw e
+                                                    }
+                                                }
+                                            } finally { event.recycle() }
+                                        }
+                                    },
+                                    onNote = { index, note ->
+                                        reply("EVENT $index ${note.status} ${note.noteDown ?: -1} ${note.noteUp ?: -1}")
+                                    },
+                                )
+                                safe.set(result.status != "UNCONFIRMED")
+                                busy.set(false)
+                                reply("END ${result.status} ${result.completed}")
+                            }
+                            worker.set(playback)
+                            playback.start()
+                        }
                     }
                     line.startsWith("PLAY ") && volumeStopped.get() -> reply("DONE STOPPED -1 -1")
                     line.startsWith("PLAY ") && !busy.get() && safe.get() -> {
