@@ -255,8 +255,11 @@ class AppViewModel(
             val calibratedLayout = requireNotNull(layout) { "请先保存校准布局" }
             val savedLayout = state.value.saved
             val speed = workspace.speed
-            val combined = workspace.combinedMode
-            val minimumTouchMs = workspace.minimumTouchMs
+            // Root runs its full score on one input timeline; the gesture path remains
+            // configurable for Accessibility.
+            val combined = workspace.combinedMode || rootBackend.preferred
+            val minimumTouchMs = if (rootBackend.preferred) maxOf(workspace.minimumTouchMs, 45L)
+                else workspace.minimumTouchMs
             val combinedLeadMs = workspace.combinedLeadMs
             val planStarted = System.nanoTime()
             val plan = withContext(Dispatchers.Default) {
