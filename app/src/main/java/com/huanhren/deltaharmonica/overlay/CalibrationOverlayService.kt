@@ -1303,6 +1303,11 @@ class CalibrationOverlayService : Service() {
                     }
                     if (touch == null) Log.w("DeltaRoot", "startup fallback to accessibility before touch")
                 }
+                val continuousSequence = if (touch != null && fresh.combined) {
+                    RootSequencePlanner.build(fresh, draft.targets.associate {
+                        it.id to Coordinates.toScreen(it.position, before.size)
+                    })
+                } else null
                 val actualInput = if (touch != null) PlaybackInput.ROOT else PlaybackInput.ACCESSIBILITY
                 PlaybackPreparation.activeInput = actualInput
                 Log.i("DeltaPlayback", "input backend=$actualInput speed=${prepared.speed}")
@@ -1462,6 +1467,32 @@ class CalibrationOverlayService : Service() {
                         removeSessionMusic()
                         if (sessionBar?.expanded == true) resizeSessionBar(false) else updateSessionBar()
                         verifySessionWindow()
+                    }, dispatchContinuous = continuousSequence?.let { sequence ->
+                        { onNote: (Int, Long?, Long?) -> Unit,
+                          isPaused: () -> Boolean,
+                          onPaused: () -> Unit,
+                          onResumed: () -> Unit ->
+                            requireNotNull(touch).playSequence(
+                                steps = sequence,
+                                stop = { runner.stopRequested || !environmentValid() },
+                                pause = isPaused,
+                                onNote = { index, down, up ->
+                                    val item = fresh.events[index]
+                                    PlaybackPreparation.actualTimings[item.sourceIndex] = ActualTiming(
+                                        down - sessionStartMs, up?.minus(sessionStartMs),
+                                        if (item.regionSwitch || item.semitoneSwitch) fresh.combinedLeadMs else 0,
+                                        item.predictedEndMs - item.predictedStartMs, "Root continuous OK",
+                                    )
+                                    if (item.regionSwitch)
+                                        runtimeState = runtimeState.regionResult(item.event.pitchRegion, TapResult.Completed)
+                                    if (item.semitoneSwitch)
+                                        runtimeState = runtimeState.semitoneResult(item.event.semitoneEnabled, TapResult.Completed)
+                                    onNote(index, down, up)
+                                },
+                                onPaused = onPaused,
+                                onResumed = onResumed,
+                            )
+                        }
                     })
             } catch (e: CancellationException) { runtimeState = runtimeState.reset() }
             catch (e: Exception) { runtimeState = runtimeState.reset(); if (!destroyed) Toast.makeText(this@CalibrationOverlayService,"播放或恢复失败：${e.localizedMessage}",Toast.LENGTH_LONG).show() }
