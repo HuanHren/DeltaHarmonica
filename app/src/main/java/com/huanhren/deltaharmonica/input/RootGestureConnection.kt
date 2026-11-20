@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.huanhren.deltaharmonica.playback.CombinedGesture
+import com.huanhren.deltaharmonica.playback.ContinuousPlaybackResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
@@ -103,6 +104,120 @@ internal class RootGestureConnection private constructor(
                     TapResult.Unavailable("Root 触摸失败，释放待确认")
                 }
             }
+        } finally {
+            if (outstanding) withContext(NonCancellable) {
+                usable = false
+                send("STOP")
+                receive(CLEANUP_TIMEOUT_MS)
+            }
+            gate.unlock()
+        }
+    }
+
+
+    /** Sends the complete note timeline once; the privileged helper controls all DOWN/UP deadlines. */
+    internal suspend fun playSequence(
+        steps: List<RootSequenceStep>,
+        stop: () -> Boolean,
+        pause: () -> Boolean,
+        onNote: (Int, Long?, Long?) -> Unit,
+        onPaused: () -> Unit,
+        onResumed: () -> Unit,
+    ): ContinuousPlaybackResult {
+        if (!gate.tryLock()) return ContinuousPlaybackResult(0, TapResult.Busy)
+        var outstanding = false
+        try {
+            if (!usable) return ContinuousPlaybackResult(0, TapResult.Unavailable("Root 输入连接已失效"))
+            if (steps.isEmpty() || steps.size > 100_000) return ContinuousPlaybackResult(0, TapResult.Unavailable("连续演奏音符数量无效"))
+            if (stop() || volumeStopped) return ContinuousPlaybackResult(0, TapResult.Cancelled)
+            val sent = withContext(Dispatchers.IO) {
+                runCatching {
+                    synchronized(commands) {
+                        commands.write("QUEUE ${steps.size}")
+                        commands.newLine()
+                        for (step in steps) {
+                            val strokes = step.strokes.joinToString(";") {
+                                "${it.x},${it.y},${it.startMs},${it.durationMs}"
+                            }
+                            commands.write("ITEM ${step.noteAtMs}|$strokes")
+                            commands.newLine()
+                        }
+                        commands.write("RUN")
+                        commands.newLine()
+                        commands.flush()
+                    }
+                }.isSuccess
+            }
+            outstanding = true
+            if (!sent) {
+                usable = false
+                return ContinuousPlaybackResult(0, TapResult.Unavailable("连续触控计划发送失败"))
+            }
+            var observed = 0
+            var end: ContinuousPlaybackResult? = null
+            val finished = coroutineScope {
+                val watcher = launch {
+                    var lastPause = false
+                    while (true) {
+                        if (stop() || volumeStopped) {
+                            send("STOP")
+                            break
+                        }
+                        val desired = pause()
+                        if (desired != lastPause) {
+                            if (!send(if (desired) "PAUSE" else "RESUME")) break
+                            lastPause = desired
+                        }
+                        delay(12)
+                    }
+                }
+                try {
+                    var missed = 0
+                    while (end == null) {
+                        val message = receive(1_000)
+                        if (message == null) {
+                            if (!process.isAlive || ++missed >= 4 || !send("PING")) break
+                            continue
+                        }
+                        missed = 0
+                        when {
+                            message == "PONG" -> Unit
+                            message == "PAUSED" -> onPaused()
+                            message == "RESUMED" -> onResumed()
+                            message.startsWith("EVENT ") -> {
+                                val parts = message.split(' ')
+                                val index = parts.getOrNull(1)?.toIntOrNull()
+                                if (parts.size != 5 || index != observed || parts[2] != "OK") break
+                                val down = parts[3].toLongOrNull()
+                                val up = parts[4].toLongOrNull()
+                                if (down == null || up == null || down < 0 || up < down) break
+                                onNote(index, down, up)
+                                observed++
+                            }
+                            message.startsWith("END ") -> {
+                                val parts = message.split(' ')
+                                val count = parts.getOrNull(2)?.toIntOrNull()
+                                if (parts.size != 3 || count != observed) break
+                                end = ContinuousPlaybackResult(count, when(parts[1]) {
+                                    "OK" -> if (count == steps.size) TapResult.Completed else TapResult.Unavailable("Root 提前结束")
+                                    "STOPPED" -> TapResult.Cancelled
+                                    "FAILED" -> TapResult.Rejected
+                                    else -> TapResult.Unavailable("Root 释放状态待确认")
+                                })
+                            }
+                            else -> break
+                        }
+                    }
+                    end
+                } finally { watcher.cancel() }
+            }
+            if (finished != null) {
+                outstanding = false
+                if (finished.result is TapResult.Unavailable) usable = false
+                return finished
+            }
+            usable = false
+            return ContinuousPlaybackResult(observed, TapResult.Unavailable("Root 连续调度通信中断或响应无效"))
         } finally {
             if (outstanding) withContext(NonCancellable) {
                 usable = false
