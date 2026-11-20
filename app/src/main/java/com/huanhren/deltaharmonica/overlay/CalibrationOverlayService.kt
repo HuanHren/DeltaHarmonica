@@ -1469,11 +1469,12 @@ class CalibrationOverlayService : Service() {
                         if (sessionBar?.expanded == true) resizeSessionBar(false) else updateSessionBar()
                         verifySessionWindow()
                     }, dispatchContinuous = continuousSequence?.let { sequence ->
-                        { onNote: (Int, Long?, Long?) -> Unit,
-                          isPaused: () -> Boolean,
-                          onPaused: () -> Unit,
-                          onResumed: () -> Unit ->
-                            requireNotNull(touch).playSequence(
+                        suspend fun runSequence(
+                            onNote: (Int, Long?, Long?) -> Unit,
+                            isPaused: () -> Boolean,
+                            onPaused: () -> Unit,
+                            onResumed: () -> Unit,
+                        ): ContinuousPlaybackResult = requireNotNull(touch).playSequence(
                                 steps = sequence,
                                 stop = { runner.stopRequested || !environmentValid() },
                                 pause = isPaused,
@@ -1493,6 +1494,8 @@ class CalibrationOverlayService : Service() {
                                 onPaused = onPaused,
                                 onResumed = onResumed,
                             )
+                        { onNote, isPaused, onPaused, onResumed ->
+                            runSequence(onNote, isPaused, onPaused, onResumed)
                         }
                     })
             } catch (e: CancellationException) { runtimeState = runtimeState.reset() }
