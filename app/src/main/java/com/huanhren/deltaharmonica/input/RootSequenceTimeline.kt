@@ -28,9 +28,11 @@ internal object RootSequenceTimeline {
         waitFor: (Long) -> Long,
         playGesture: (List<RootStroke>) -> RootTouchOutcome,
         onNote: (Int, RootTouchOutcome) -> Unit,
+        onStarted: (Long) -> Unit = {},
     ): RootSequenceOutcome {
         require(steps.isNotEmpty())
         val origin = now()
+        onStarted(origin)
         var pauseShift = 0L
         var completed = 0
         for ((index, step) in steps.withIndex()) {
