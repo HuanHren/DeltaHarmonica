@@ -265,6 +265,7 @@ class AppViewModel(
             val plan = withContext(Dispatchers.Default) {
                 PlaybackPlanner.plan(script, calibratedLayout, runtime.pitchRegion, runtime.semitoneEnabled,
                     0, count, speed, combined = combined, minimumTouchMs = minimumTouchMs, combinedLeadMs = combinedLeadMs,
+                gestureOverheadMs = if (rootBackend.preferred) 40 else 30,
                     checkActive = { ensureActive() })
             }
             logScoreTiming("playback_plan", planStarted)
