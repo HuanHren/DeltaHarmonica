@@ -123,6 +123,7 @@ internal class RootGestureConnection private constructor(
         onNote: (Int, Long?, Long?) -> Unit,
         onPaused: () -> Unit,
         onResumed: () -> Unit,
+        onStarted: (Long) -> Unit = {},
     ): ContinuousPlaybackResult {
         if (!gate.tryLock()) return ContinuousPlaybackResult(0, TapResult.Busy)
         var outstanding = false
@@ -154,6 +155,8 @@ internal class RootGestureConnection private constructor(
                 return ContinuousPlaybackResult(0, TapResult.Unavailable("连续触控计划发送失败"))
             }
             var observed = 0
+            var origin: Long? = null
+            var maxLatenessMs = 0L
             var end: ContinuousPlaybackResult? = null
             val finished = coroutineScope {
                 val watcher = launch {
@@ -184,6 +187,13 @@ internal class RootGestureConnection private constructor(
                             message == "PONG" -> Unit
                             message == "PAUSED" -> onPaused()
                             message == "RESUMED" -> onResumed()
+                            message.startsWith("START ") -> {
+                                if (origin != null) break
+                                val time = message.removePrefix("START ").toLongOrNull()
+                                if (time == null || time < 0) break
+                                origin = time
+                                onStarted(time)
+                            }
                             message.startsWith("EVENT ") -> {
                                 val parts = message.split(' ')
                                 val index = parts.getOrNull(1)?.toIntOrNull()
@@ -192,6 +202,8 @@ internal class RootGestureConnection private constructor(
                                     val down = parts[3].toLongOrNull()
                                     val up = parts[4].toLongOrNull()
                                     if (down == null || up == null || down < 0 || up < down) break
+                                    val began = origin ?: break
+                                    maxLatenessMs = maxOf(maxLatenessMs, (down - began - steps[index].noteAtMs).coerceAtLeast(0L))
                                     onNote(index, down, up)
                                     observed++
                                 } else if (parts[2] !in setOf("STOPPED", "FAILED", "UNCONFIRMED")) break
@@ -205,7 +217,7 @@ internal class RootGestureConnection private constructor(
                                     "STOPPED" -> TapResult.Cancelled
                                     "FAILED" -> TapResult.Rejected
                                     else -> TapResult.Unavailable("Root 释放状态待确认")
-                                })
+                                }, maxLatenessMs)
                             }
                             else -> break
                         }
@@ -239,7 +251,8 @@ internal class RootGestureConnection private constructor(
         val outcome = withTimeoutOrNull(CLEANUP_TIMEOUT_MS) {
             var reply = replies.receiveCatching().getOrNull()
             while (reply != null && (reply.startsWith("DONE ") || reply.startsWith("EVENT ") ||
-                        reply.startsWith("END ") || reply in setOf("PONG", "PAUSED", "RESUMED")))
+                        reply.startsWith("END ") || reply.startsWith("START ") ||
+                        reply in setOf("PONG", "PAUSED", "RESUMED")))
                 reply = replies.receiveCatching().getOrNull()
             when (reply) {
                 "CLOSED" -> RootCleanup.ACKNOWLEDGED
