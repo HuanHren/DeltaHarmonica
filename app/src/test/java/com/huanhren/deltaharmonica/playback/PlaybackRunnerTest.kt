@@ -178,4 +178,46 @@ class PlaybackRunnerTest {
         } catch (_: IllegalStateException) { }
         assertEquals(1,restored)
     }
+    @Test fun continuousRootRouteReportsEachNoteAndRestoresOnce() = runBlocking {
+        val plan = PlaybackPlanner.plan(script, layout, Region.NATURAL, false, 0, 8, 1.0, combined = true)
+        val runner = PlaybackRunner()
+        var singles = 0
+        var restores = 0
+        val progress = mutableListOf<Int>()
+        val result = runner.run(
+            plan, {}, {}, { true }, { _, _ -> singles++; TapResult.Completed },
+            { restores++ }, dryRunCompleted = true, warningsConfirmed = true,
+            onEvent = { count, _, done -> if (done) progress.add(count) },
+            dispatchContinuous = { onNote, _, onPaused, onResumed ->
+                onPaused()
+                onResumed()
+                repeat(8) { onNote(it, 100L + it, 110L + it) }
+                ContinuousPlaybackResult(8, TapResult.Completed)
+            },
+        )
+        assertEquals(8, result.completed)
+        assertEquals(0, singles)
+        assertEquals(1, restores)
+        assertEquals((1..8).toList(), progress)
+        assertNull(result.failure)
+    }
+
+    @Test fun continuousRootStopDoesNotCompleteUnplayedEvents() = runBlocking {
+        val plan = PlaybackPlanner.plan(script, layout, Region.NATURAL, false, 0, 8, 1.0, combined = true)
+        val runner = PlaybackRunner()
+        val result = runner.run(
+            plan, {}, {}, { true }, { _, _ -> fail("Root must not use serial dispatch"); TapResult.Rejected },
+            {}, dryRunCompleted = true, warningsConfirmed = true,
+            dispatchContinuous = { onNote, _, _, _ ->
+                onNote(0, 10L, 30L)
+                runner.requestStop()
+                ContinuousPlaybackResult(1, TapResult.Cancelled)
+            },
+        )
+        assertTrue(result.stopped)
+        assertNull(result.failure)
+        assertEquals(1, result.completed)
+        assertEquals(7, result.remaining)
+    }
+
 }
