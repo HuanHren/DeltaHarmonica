@@ -125,6 +125,24 @@ class RootSequenceTimelineTest {
         assertEquals(1, calls)
     }
 
+    @Test fun inputStallDoesNotBurstCatchUpWithObsoleteNotes() {
+        var now = 0L
+        var injected = 0
+        val result = RootSequenceTimeline.play(
+            listOf(step(0), step(100)),
+            now = { now },
+            waitFor = { deadline -> now = deadline + 2_100L; 0L },
+            playGesture = {
+                injected++
+                RootTouchOutcome("OK", now, now + 50)
+            },
+            onNote = { _, _ -> },
+        )
+        assertEquals("FAILED", result.status)
+        assertEquals(0, result.completed)
+        assertEquals(0, injected)
+    }
+
     @Test fun failedInjectionDoesNotAdvanceProgressOrContinue() {
         val result = RootSequenceTimeline.play(
             listOf(step(0), step(100), step(200)),
