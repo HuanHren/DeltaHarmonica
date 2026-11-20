@@ -48,6 +48,9 @@ internal object RootSequenceTimeline {
             } catch (_: Exception) {
                 return RootSequenceOutcome("FAILED", completed)
             }
+            // Never turn a stalled game/input dispatcher into a fast burst of stale notes.
+            if (now() - (startAt + pauseShift) > 2_000L)
+                return RootSequenceOutcome("FAILED", completed)
             val outcome = try {
                 playGesture(step.strokes)
             } catch (_: Exception) {
