@@ -1116,6 +1116,7 @@ class CalibrationOverlayService : Service() {
                 PlaybackPlanner.plan(prepared.script, draft, planningState.pitchRegion, planningState.semitoneEnabled,
                     prepared.start, prepared.count, prepared.speed, combined = prepared.plan.combined,
                     minimumTouchMs = prepared.plan.minimumTouchMs, combinedLeadMs = prepared.plan.combinedLeadMs,
+                    gestureOverheadMs = prepared.plan.gestureOverheadMs,
                     checkActive = { ensureActive() })
             }.getOrNull()
         }
