@@ -9,6 +9,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.atomic.AtomicBoolean
 
+data class ContinuousPlaybackResult(val completed: Int, val result: TapResult)
+
 enum class PlaybackPhase { READY, HIDING, RUNNING, STOP_REQUESTED, WAITING_FOR_GESTURE, GESTURE_FINISHED, PAUSED, RESUMED, TERMINATED, RESTORING, RESTORED }
 data class PlaybackResult(val completed: Int, val remaining: Int, val stopped: Boolean, val failure: String?, val maxLatenessMs: Long, val elapsedMs: Long,
     val regionSwitches: Int = 0, val semitoneSwitches: Int = 0)
@@ -41,7 +43,10 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
                     onEvent: (Int, String, Boolean) -> Unit = { _,_,_ -> },
                     onSessionStarted: (Long) -> Unit = {},
                     dispatchCombined: (suspend (PlannedEvent, Long) -> TapResult)? = null,
-                    onResuming: suspend () -> Unit = {}): PlaybackResult {
+                    onResuming: suspend () -> Unit = {},
+                    dispatchContinuous: (suspend (
+                        (Int, Long?, Long?) -> Unit, () -> Boolean, () -> Unit, () -> Unit
+                    ) -> ContinuousPlaybackResult)? = null): PlaybackResult {
         require(dryRunCompleted && (plan.warnings.isEmpty() || warningsConfirmed)) { "必须先完成 Dry-run 并确认警告" }
         require(plan.fatalErrors.isEmpty()) { "计划包含不可播放的错误" }
         check(mutex.tryLock()) { "已有播放会话正在执行" }
@@ -99,7 +104,40 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
                 startedAt = start
                 onSessionStarted(start)
                 onPhase(PlaybackPhase.RUNNING)
-                for (item in plan.events) {
+                if (dispatchContinuous != null) {
+                    val continuous = dispatchContinuous(
+                        { index, _, _ ->
+                            check(index == completed && index in plan.events.indices) { "Root 逐音进度顺序错误" }
+                            val item = plan.events[index]
+                            onEvent(completed, item.event.noteKeyId, false)
+                            if (item.regionSwitch) regionSwitches++
+                            if (item.semitoneSwitch) semitoneSwitches++
+                            completed++
+                            onEvent(completed, item.event.noteKeyId, true)
+                        },
+                        { pause.get() },
+                        {
+                            if (pauseStartedAt == null) {
+                                pauseStartedAt = nowMs()
+                                onPhase(PlaybackPhase.PAUSED)
+                            }
+                        },
+                        {
+                            pauseStartedAt?.let { pausedMs += nowMs() - it }
+                            pauseStartedAt = null
+                            onPhase(PlaybackPhase.RESUMED)
+                        },
+                    )
+                    if (continuous.completed != completed) {
+                        failure = "Root 逐音计数不一致，释放状态需检查"
+                    } else if (continuous.result == TapResult.Cancelled && stop.get()) {
+                        // Stopped by the user after releasing the active stroke.
+                    } else if (continuous.result != TapResult.Completed) {
+                        failure = "Root 连续触控未完成：${continuous.result}"
+                    } else if (!valid()) {
+                        failure = "连续触控结束时游戏环境已变化"
+                    }
+                } else for (item in plan.events) {
                     onEvent(completed,item.event.noteKeyId,false)
                     if (plan.combined) {
                         val lead=if(item.regionSwitch || item.semitoneSwitch) plan.combinedLeadMs else 0L
