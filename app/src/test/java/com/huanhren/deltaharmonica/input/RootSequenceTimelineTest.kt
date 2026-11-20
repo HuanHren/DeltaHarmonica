@@ -76,6 +76,33 @@ class RootSequenceTimelineTest {
         assertEquals(listOf(0L, 800L), starts)
     }
 
+    @Test fun repeatedPausesAreNotCountedTwice() {
+        var now = 0L
+        var pauses = 0
+        val starts = mutableListOf<Long>()
+        val result = RootSequenceTimeline.play(
+            listOf(step(0), step(100), step(200)),
+            now = { now },
+            waitFor = { deadline ->
+                if (pauses < 2 && deadline == (if (pauses == 0) 100L else 400L)) {
+                    val extra = if (pauses == 0) 200L else 100L
+                    pauses++
+                    now = deadline + extra
+                    extra
+                } else { now = maxOf(now, deadline); 0L }
+            },
+            playGesture = {
+                starts.add(now)
+                now += it.last().durationMs
+                RootTouchOutcome("OK", now - 50, now)
+            },
+            onNote = { _, _ -> },
+        )
+        assertTrue(result.completedAll)
+        assertEquals(2, pauses)
+        assertEquals(listOf(0L, 300L, 500L), starts)
+    }
+
     @Test fun stopBetweenNotesDoesNotStartTheNextStroke() {
         var now = 0L
         var calls = 0
