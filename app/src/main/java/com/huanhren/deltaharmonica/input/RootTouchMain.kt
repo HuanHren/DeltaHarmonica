@@ -67,7 +67,14 @@ object RootTouchMain {
                             queueCapacity = 0
                             queued.clear()
                             reply("END FAILED 0")
-                        } else queued.add(RootSequenceStep(at, strokes))
+                        } else {
+                            val item = runCatching { RootSequenceStep(at, strokes) }.getOrNull()
+                            if (item == null) {
+                                queueCapacity = 0
+                                queued.clear()
+                                reply("END FAILED 0")
+                            } else queued.add(item)
+                        }
                     }
                     line == "RUN" && !busy.get() && safe.get() -> {
                         if (queueCapacity == 0 || queued.size != queueCapacity) {
@@ -89,7 +96,7 @@ object RootTouchMain {
                                         LockSupport.parkNanos(minOf(remaining, 25L) * 1_000_000)
                                     }
                                 }
-                                val result = RootSequenceTimeline.play(
+                                val result = runCatching { RootSequenceTimeline.play(
                                     steps,
                                     SystemClock::uptimeMillis,
                                     waitFor = { deadline ->
@@ -130,7 +137,7 @@ object RootTouchMain {
                                     onNote = { index, note ->
                                         reply("EVENT $index ${note.status} ${note.noteDown ?: -1} ${note.noteUp ?: -1}")
                                     },
-                                )
+                                ) }.getOrElse { RootSequenceOutcome("UNCONFIRMED", 0) }
                                 safe.set(result.status != "UNCONFIRMED")
                                 busy.set(false)
                                 reply("END ${result.status} ${result.completed}")
