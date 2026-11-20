@@ -9,7 +9,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class ContinuousPlaybackResult(val completed: Int, val result: TapResult)
+data class ContinuousPlaybackResult(val completed: Int, val result: TapResult, val maxLatenessMs: Long = 0)
 
 enum class PlaybackPhase { READY, HIDING, RUNNING, STOP_REQUESTED, WAITING_FOR_GESTURE, GESTURE_FINISHED, PAUSED, RESUMED, TERMINATED, RESTORING, RESTORED }
 data class PlaybackResult(val completed: Int, val remaining: Int, val stopped: Boolean, val failure: String?, val maxLatenessMs: Long, val elapsedMs: Long,
@@ -128,6 +128,7 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
                             onPhase(PlaybackPhase.RESUMED)
                         },
                     )
+                    maxLate = maxOf(maxLate, continuous.maxLatenessMs)
                     if (continuous.completed != completed) {
                         failure = "Root 逐音计数不一致，释放状态需检查"
                     } else if (continuous.result == TapResult.Cancelled && stop.get()) {
