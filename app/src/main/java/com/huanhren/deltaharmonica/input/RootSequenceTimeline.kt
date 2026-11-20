@@ -36,7 +36,11 @@ internal object RootSequenceTimeline {
         for ((index, step) in steps.withIndex()) {
             val startAt = origin + step.noteAtMs - step.strokes.last().startMs + pauseShift
             try {
-                pauseShift += waitFor(startAt)
+                var pausedHere: Long
+                do {
+                    pausedHere = waitFor(startAt + pauseShift)
+                    pauseShift += pausedHere
+                } while (pausedHere > 0L)
             } catch (_: InterruptedException) {
                 return RootSequenceOutcome("STOPPED", completed)
             } catch (_: Exception) {
