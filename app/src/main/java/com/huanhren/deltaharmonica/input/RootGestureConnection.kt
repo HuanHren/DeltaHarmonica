@@ -187,12 +187,14 @@ internal class RootGestureConnection private constructor(
                             message.startsWith("EVENT ") -> {
                                 val parts = message.split(' ')
                                 val index = parts.getOrNull(1)?.toIntOrNull()
-                                if (parts.size != 5 || index != observed || parts[2] != "OK") break
-                                val down = parts[3].toLongOrNull()
-                                val up = parts[4].toLongOrNull()
-                                if (down == null || up == null || down < 0 || up < down) break
-                                onNote(index, down, up)
-                                observed++
+                                if (parts.size != 5 || index != observed) break
+                                if (parts[2] == "OK") {
+                                    val down = parts[3].toLongOrNull()
+                                    val up = parts[4].toLongOrNull()
+                                    if (down == null || up == null || down < 0 || up < down) break
+                                    onNote(index, down, up)
+                                    observed++
+                                } else if (parts[2] !in setOf("STOPPED", "FAILED", "UNCONFIRMED")) break
                             }
                             message.startsWith("END ") -> {
                                 val parts = message.split(' ')
@@ -236,7 +238,9 @@ internal class RootGestureConnection private constructor(
         withContext(Dispatchers.IO) { runCatching { commands.close() } }
         val outcome = withTimeoutOrNull(CLEANUP_TIMEOUT_MS) {
             var reply = replies.receiveCatching().getOrNull()
-            while (reply != null && reply.startsWith("DONE ")) reply = replies.receiveCatching().getOrNull()
+            while (reply != null && (reply.startsWith("DONE ") || reply.startsWith("EVENT ") ||
+                        reply.startsWith("END ") || reply in setOf("PONG", "PAUSED", "RESUMED")))
+                reply = replies.receiveCatching().getOrNull()
             when (reply) {
                 "CLOSED" -> RootCleanup.ACKNOWLEDGED
                 "UNCONFIRMED" -> RootCleanup.REJECTED
