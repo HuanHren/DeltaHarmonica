@@ -2,6 +2,8 @@ package com.huanhren.deltaharmonica.playback
 
 /** Planning allowance for DOWN and UP transport. Runtime gaps use physical floors. */
 internal const val ROOT_STROKE_DISPATCH_MARGIN_MS = 12L
+internal const val ROOT_RECOVERY_WINDOW_MS = 120L
+internal const val ROOT_MAX_TIMELINE_SHIFT_MS = 2_000L
 
 /** Physical milliseconds. The Android candidate requires in-game audio calibration. */
 data class RootPlaybackTiming(

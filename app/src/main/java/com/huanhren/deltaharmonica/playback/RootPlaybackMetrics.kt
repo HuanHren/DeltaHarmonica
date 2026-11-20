@@ -4,7 +4,7 @@ import kotlin.math.abs
 
 /** Bounded aggregate of InputManager DOWN/UP times after adjusting for pauses. */
 internal class RootPlaybackMetrics(maxLatenessMs: Long) {
-    private val lateness = IntArray(maxLatenessMs.toInt() + 1)
+    private val lateness = IntArray((maxLatenessMs + ROOT_RECOVERY_WINDOW_MS + ROOT_MAX_TIMELINE_SHIFT_MS).toInt() + 1)
     private var count = 0
     private var latenessSum = 0L
     private var maxLate = 0L

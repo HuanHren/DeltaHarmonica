@@ -1,5 +1,9 @@
 package com.huanhren.deltaharmonica.input
 
+import com.huanhren.deltaharmonica.playback.ROOT_MAX_TIMELINE_SHIFT_MS
+import com.huanhren.deltaharmonica.playback.ROOT_RECOVERY_WINDOW_MS
+import com.huanhren.deltaharmonica.playback.ROOT_STROKE_DISPATCH_MARGIN_MS
+
 /** One playable note with the ordered control strokes that must precede its DOWN. */
 internal data class RootSequenceStep(
     val noteAtMs: Long,
@@ -42,10 +46,20 @@ internal object RootSequenceTimeline {
         val origin = now()
         onStarted(origin)
         var pauseShift = 0L
+        var timelineShift = 0L
         var completed = 0
         var releasedAt: Long? = null
+        var previousPlannedUp = 0L
+        val maxShift = ((steps.last().noteAtMs + steps.last().strokes.last().durationMs) / 50L)
+            .coerceIn(ROOT_RECOVERY_WINDOW_MS, ROOT_MAX_TIMELINE_SHIFT_MS)
         for ((index, step) in steps.withIndex()) {
-            val startAt = origin + step.noteAtMs - step.strokes.last().startMs
+            val lead = step.strokes.last().startMs
+            val plannedFirstDown = step.noteAtMs - lead
+            // Reclaim phase delay only from a rest left after mandatory touch spacing.
+            val rest = (plannedFirstDown - previousPlannedUp - step.minGapMs - ROOT_STROKE_DISPATCH_MARGIN_MS)
+                .coerceAtLeast(0L)
+            timelineShift = (timelineShift - rest).coerceAtLeast(0L)
+            val startAt = origin + plannedFirstDown + timelineShift
             val nextSafeDown = releasedAt?.plus(step.minGapMs) ?: origin
             try {
                 var pausedHere: Long
@@ -60,7 +74,7 @@ internal object RootSequenceTimeline {
             }
             // Never turn a stalled game/input dispatcher into a fast burst of stale notes.
             val plannedStart = startAt + pauseShift
-            if (now() - plannedStart > step.maxLatenessMs)
+            if (now() - plannedStart > step.maxLatenessMs + ROOT_RECOVERY_WINDOW_MS)
                 return RootSequenceOutcome("LATE", completed)
             val outcome = try {
                 playTimedGesture?.invoke(step, plannedStart) ?: playGesture(step.strokes)
@@ -72,6 +86,15 @@ internal object RootSequenceTimeline {
             onNote(index, outcome)
             if (!outcome.completed) return RootSequenceOutcome(outcome.status, completed)
             completed++
+            previousPlannedUp = step.noteAtMs + step.strokes.last().durationMs
+            val noteDelay = (outcome.noteDown ?: (plannedStart + lead)) - (plannedStart + lead)
+            if (noteDelay > step.maxLatenessMs) {
+                // Preserve the phase after a recoverable stall instead of replaying stale events.
+                timelineShift += noteDelay
+                if (timelineShift > maxShift && completed < steps.size) {
+                    return RootSequenceOutcome("LATE", completed)
+                }
+            }
         }
         return RootSequenceOutcome("OK", completed)
     }

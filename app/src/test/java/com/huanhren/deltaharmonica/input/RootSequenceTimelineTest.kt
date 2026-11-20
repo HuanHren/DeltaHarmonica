@@ -143,6 +143,53 @@ class RootSequenceTimelineTest {
         assertEquals(0, injected)
     }
 
+    @Test fun recoverableStallRephasesFollowingNotesAndPaysBackDuringRests() {
+        var now = 0L
+        var stalledOnce = false
+        val downTimes = mutableListOf<Long>()
+        val plannedTimes = mutableListOf<Long>()
+        val result = RootSequenceTimeline.play(
+            listOf(step(0), step(100), step(200).copy(minGapMs = 20), step(450)),
+            now = { now },
+            waitFor = { deadline ->
+                now = maxOf(now, deadline)
+                if (deadline == 100L && !stalledOnce) {
+                    stalledOnce = true
+                    now += 57L
+                }
+                0L
+            },
+            playGesture = {
+                val down = now
+                downTimes.add(down)
+                now += it.last().durationMs
+                RootTouchOutcome("OK", down, now)
+            },
+            onNote = { _, _ -> },
+            onScheduledNote = { _, _, original -> plannedTimes.add(original) },
+        )
+        assertTrue(result.completedAll)
+        assertEquals(listOf(0L, 157L, 239L, 450L), downTimes)
+        assertEquals(listOf(0L, 100L, 200L, 450L), plannedTimes)
+    }
+
+    @Test fun repeatedStallsWithoutRestStopWhenPhaseShiftExceedsBudget() {
+        var now = 0L
+        val result = RootSequenceTimeline.play(
+            List(5) { step(it * 50L) },
+            now = { now },
+            waitFor = { deadline -> now = maxOf(now, deadline) + 60L; 0L },
+            playGesture = {
+                val down = now
+                now += it.last().durationMs
+                RootTouchOutcome("OK", down, now)
+            },
+            onNote = { _, _ -> },
+        )
+        assertEquals("LATE", result.status)
+        assertEquals(3, result.completed)
+    }
+
     @Test fun failedInjectionDoesNotAdvanceProgressOrContinue() {
         val result = RootSequenceTimeline.play(
             listOf(step(0), step(100), step(200)),

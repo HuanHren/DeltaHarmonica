@@ -6,6 +6,7 @@ import android.view.InputDevice
 import android.view.InputEvent
 import android.view.MotionEvent
 import com.huanhren.deltaharmonica.playback.ROOT_STROKE_DISPATCH_MARGIN_MS
+import com.huanhren.deltaharmonica.playback.ROOT_RECOVERY_WINDOW_MS
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -212,7 +213,7 @@ private class RootHelperSession(targetUid: Int) {
                     playGesture = { gesture(it) },
                     onNote = { _, _ -> },
                     onStarted = { reply(id, "START $it") },
-                    playTimedGesture = { step, at -> gesture(step.strokes, at, step.maxLatenessMs) },
+                playTimedGesture = { step, at -> gesture(step.strokes, at, step.maxLatenessMs + ROOT_RECOVERY_WINDOW_MS) },
                     onScheduledNote = { index, note, planned ->
                         reply(id, "EVENT $index ${note.status} $planned ${note.noteDown ?: -1} ${note.noteUp ?: -1}")
                     },

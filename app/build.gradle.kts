@@ -32,7 +32,7 @@ android {
         targetSdk = 35
         versionCode = 5
         // Retain versionCode 5 for same-signer comparison with 2.3.0 during device acceptance.
-        versionName = "2.4.0-rc.1"
+        versionName = "2.4.0-rc.2"
 
         testInstrumentationRunner =
             "com.huanhren.deltaharmonica.AccessibilityTestRunner"
