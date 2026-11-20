@@ -33,6 +33,7 @@ import com.huanhren.deltaharmonica.input.NoteActionState
 import com.huanhren.deltaharmonica.input.DisplaySnapshot
 import com.huanhren.deltaharmonica.input.FocusedWindow
 import com.huanhren.deltaharmonica.input.RootGestureConnection
+import com.huanhren.deltaharmonica.input.RootSequencePlanner
 import com.huanhren.deltaharmonica.input.RootCleanup
 import com.huanhren.deltaharmonica.input.displaySnapshot
 import com.huanhren.deltaharmonica.model.*
