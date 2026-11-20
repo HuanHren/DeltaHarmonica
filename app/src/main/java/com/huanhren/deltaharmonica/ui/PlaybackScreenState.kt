@@ -6,10 +6,10 @@ import androidx.compose.runtime.setValue
 import com.huanhren.deltaharmonica.midi.*
 import com.huanhren.deltaharmonica.playback.*
 import com.huanhren.deltaharmonica.data.SongLibraryRepository
+import com.huanhren.deltaharmonica.data.SongSourceType
 import com.huanhren.deltaharmonica.model.DefaultLayouts
 import com.huanhren.deltaharmonica.model.DefaultProfiles
 import com.huanhren.deltaharmonica.model.InstrumentLayout
-import com.huanhren.deltaharmonica.online.DfhsDecoder
 import com.huanhren.deltaharmonica.online.OnlineSongConverter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -49,6 +49,8 @@ class MidiWorkspace {
     var songId by mutableStateOf<String?>(null)
     var candidateName by mutableStateOf("")
     var candidateToken by mutableStateOf<String?>(null)
+    var candidateHash by mutableStateOf<String?>(null)
+    var candidateFormat by mutableStateOf(ScoreFormat.MIDI)
     var candidateTrack by mutableStateOf(0)
     var candidatePolicy by mutableStateOf(MonophonyPolicy.HIGHEST_NOTE)
     var candidateTranspose by mutableStateOf(0)
@@ -91,18 +93,43 @@ internal suspend fun loadLibrarySong(
     val origin = item.online
     val conversionLayout = layout ?: if (options != null) DefaultLayouts.create() else null
     val profile = conversionLayout?.profile ?: DefaultProfiles.delta()
-    val report = if (origin != null && conversionLayout != null &&
-        (!ScriptConverter.matchesProfile(stored, profile, conversionLayout) ||
-            (options != null && (options.policy != stored.monophonyPolicy || options.transpose != origin.userTranspose)))) {
+    val format = when (item.sourceType) {
+        SongSourceType.MIDI -> SongCompatibilityAnalyzer.midiFormat(item.originalFileName)
+        SongSourceType.JSON -> ScoreFormat.JSON
+        SongSourceType.ONLINE_DFHS, SongSourceType.LOCAL_DFHS -> ScoreFormat.DFHS1
+    }
+    val mappingChanged = conversionLayout != null && (!ScriptConverter.matchesProfile(stored, profile, conversionLayout) ||
+        stored.mappingVerified != profile.verified || stored.provenance == null)
+    val optionsChanged = origin != null && options != null &&
+        (options.policy != stored.monophonyPolicy || options.transpose != origin.userTranspose)
+    val report = if (format == ScoreFormat.DFHS1 && (mappingChanged || optionsChanged)) {
         val original = repository.readOriginal(id)
         withContext(Dispatchers.Default) {
-            val score = DfhsDecoder.decode(original) { ensureActive() }
-            OnlineSongConverter.convert(score, item.originalFileName, options?.policy ?: stored.monophonyPolicy,
-                options?.transpose ?: origin.userTranspose, profile, conversionLayout) { ensureActive() }
+            OnlineSongConverter.convertCompressed(original, item.originalFileName, options?.policy ?: stored.monophonyPolicy,
+                options?.transpose ?: origin?.userTranspose ?: 0, profile, conversionLayout) { ensureActive() }
+        }
+    } else if (item.sourceType == SongSourceType.MIDI && mappingChanged) {
+        val original = repository.readOriginal(id)
+        withContext(Dispatchers.Default) {
+            val key = ScoreConversionCache.key(item.contentHash, format, stored.sourceTrack,
+                stored.monophonyPolicy, stored.transpose, profile, conversionLayout)
+            ScoreConversionCache.getOrConvert(key, item.originalFileName) {
+                val source = SongCompatibilityAnalyzer.readMidi(original) { ensureActive() }
+                ScriptConverter.convertMidi(source.midi, item.originalFileName, stored.sourceTrack,
+                    stored.monophonyPolicy, stored.transpose, profile, conversionLayout, source.format) { ensureActive() }
+            }
         }
     } else withContext(Dispatchers.Default) {
-        val changes = stored.events.zipWithNext().sumOf { (a,b) -> (if (a.pitchRegion != b.pitchRegion) 1 else 0) + (if (a.semitoneEnabled != b.semitoneEnabled) 1 else 0) }
-        ConversionReport(stored, item.warnings, changes)
+        var changes = 0
+        for (index in 1 until stored.events.size) {
+            if (index % 1024 == 0) ensureActive()
+            val previous = stored.events[index - 1]
+            val next = stored.events[index]
+            if (previous.pitchRegion != next.pitchRegion) changes++
+            if (previous.semitoneEnabled != next.semitoneEnabled) changes++
+        }
+        val report = SongCompatibilityAnalyzer.analyze(stored, format, conversionLayout)
+        ConversionReport(stored, item.warnings, changes, report)
     }
     val script = report.script
     workspace.commitActivation(request) {
@@ -111,7 +138,10 @@ internal suspend fun loadLibrarySong(
         PlaybackPreparation.pending = null
         workspace.songId = id
         workspace.name = item.displayName
-        workspace.sourceFormat = if (origin != null) "DFHS1" else item.sourceType.name
+        workspace.sourceFormat = when (report.compatibility.format) {
+            ScoreFormat.ZIP_MIDI -> "ZIP MIDI"
+            else -> report.compatibility.format.name
+        }
         workspace.report = report
         workspace.dryRun = null
         workspace.parsed = null

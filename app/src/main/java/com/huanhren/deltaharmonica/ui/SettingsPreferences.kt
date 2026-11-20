@@ -41,6 +41,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.huanhren.deltaharmonica.R
 import com.huanhren.deltaharmonica.input.BackendAvailability
 import com.huanhren.deltaharmonica.input.BackendStatus
+import com.huanhren.deltaharmonica.input.RootAuthorizationState
+import com.huanhren.deltaharmonica.input.RootInputReadiness
 import com.huanhren.deltaharmonica.playback.PlaybackPreparation
 import com.huanhren.deltaharmonica.ui.theme.*
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -68,7 +70,7 @@ internal fun PlaybackPreferences(state: AppUiState, model: AppViewModel) {
     }
     PreferenceGroup(R.string.backend) {
         val choices = settingsBackends(state, model.rootUiAllowed)
-        val selected = choices.indexOfFirst { it.first == state.selectedBackend }
+        val selected = choices.indexOfFirst { it.first == state.preferredBackend }
         if (selected >= 0) {
             OverlayDropdownPreference(choices.map { (name, _) -> backendLabel(name) }, selected, stringResource(R.string.backend),
                 onSelectedIndexChange = { index -> model.selectBackend(choices[index].first) }, enabled = idle)
@@ -146,6 +148,7 @@ internal fun SystemPreferences(state: AppUiState, model: AppViewModel, onAppeara
         if (accessibilityError) SupportingText(stringResource(R.string.accessibility_settings_error), Modifier.padding(horizontal = Spacing.card), error = true)
         if (state.accessibilityGrantMessage.isNotEmpty()) SupportingText(state.accessibilityGrantMessage, Modifier.padding(horizontal = Spacing.card))
     }
+    if (model.rootUiAllowed) RootAuthorizationPreferences(state, model, idle)
     PreferenceGroup {
         ArrowPreference(stringResource(R.string.appearance), summary = stringResource(appearance.theme.labelRes()),
             modifier = Modifier.testTag("studio/settings/appearance"), onClick = onAppearance)
@@ -155,6 +158,69 @@ internal fun SystemPreferences(state: AppUiState, model: AppViewModel, onAppeara
             ArrowPreference(stringResource(if (state.enablingAccessibility) R.string.enabling_accessibility_root else R.string.enable_accessibility_root),
                 enabled = idle && !state.enablingAccessibility, onClick = model::enableAccessibilityWithRoot)
         }
+    }
+}
+
+@Composable
+private fun RootAuthorizationPreferences(state: AppUiState, model: AppViewModel, idle: Boolean) {
+    val root by model.rootAuthorization.collectAsStateWithLifecycle()
+    val readyBackend = state.selectedBackend.takeIf { state.selectedBackendStatus?.available == true }
+    val canChange = idle && !state.checkingRoot
+    PreferenceGroup(R.string.root_preferences) {
+        BasicComponent(
+            title = stringResource(R.string.root_environment),
+            summary = stringResource(when (root.environment.suVisible) {
+                true -> R.string.root_environment_visible
+                false -> R.string.root_environment_not_found
+                null -> R.string.root_state_unknown
+            }),
+        )
+        BasicComponent(
+            title = stringResource(R.string.root_manager),
+            summary = root.environment.manager?.kind?.label ?: stringResource(R.string.root_manager_unknown),
+        )
+        BasicComponent(
+            title = stringResource(R.string.root_authorization),
+            summary = stringResource(if (state.checkingRoot) R.string.root_checking else when (root.authorization) {
+                RootAuthorizationState.UNKNOWN -> R.string.root_state_unknown
+                RootAuthorizationState.NOT_ROOTED -> R.string.root_environment_not_found
+                RootAuthorizationState.NOT_AUTHORIZED -> R.string.root_state_not_authorized
+                RootAuthorizationState.PREVIOUSLY_AUTHORIZED -> R.string.root_state_cached
+                RootAuthorizationState.AUTHORIZED -> R.string.root_state_authorized
+                RootAuthorizationState.DENIED -> R.string.root_state_denied
+                RootAuthorizationState.REVOKED -> R.string.root_state_revoked
+                RootAuthorizationState.MANAGER_UNAVAILABLE -> R.string.root_state_manager_unavailable
+                RootAuthorizationState.RECHECK_REQUIRED -> R.string.root_state_recheck
+                RootAuthorizationState.ERROR -> R.string.root_state_error
+            }),
+        )
+        BasicComponent(
+            title = stringResource(R.string.root_input_readiness),
+            summary = stringResource(when (root.input) {
+                RootInputReadiness.UNKNOWN -> R.string.root_input_pending
+                RootInputReadiness.READY -> R.string.root_input_ready
+                RootInputReadiness.UNAVAILABLE -> R.string.root_input_unavailable
+            }),
+        )
+        BasicComponent(title = stringResource(R.string.root_current_backend), summary =
+            if (readyBackend != null) backendLabel(readyBackend) else stringResource(R.string.root_no_usable_backend))
+        ArrowPreference(
+            title = stringResource(R.string.root_detect_environment),
+            enabled = canChange,
+            onClick = model::detectRootEnvironment,
+        )
+        ArrowPreference(
+            title = stringResource(R.string.root_request_authorization),
+            enabled = canChange,
+            onClick = model::checkRoot,
+        )
+        OverlayDropdownPreference(
+            listOf(backendLabel("Root"), backendLabel("Accessibility")),
+            if (state.preferredBackend == "Root") 0 else 1,
+            stringResource(R.string.root_preferred_backend),
+            onSelectedIndexChange = { model.selectBackend(if (it == 0) "Root" else "Accessibility") },
+            enabled = canChange,
+        )
     }
 }
 
@@ -348,7 +414,7 @@ private fun <T> StudioDropdown(items: List<T>, value: T, label: @Composable (T) 
     }
 }
 @Composable
-private fun PreferenceGroup(@StringRes title: Int? = null, body: @Composable ColumnScope.() -> Unit) {
+internal fun PreferenceGroup(@StringRes title: Int? = null, body: @Composable ColumnScope.() -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.small)) {
         if (title != null) Text(stringResource(title), Modifier.padding(horizontal = Spacing.item),
             style = StudioTypography.labelLarge, color = StudioTheme.colorScheme.onSurfaceSecondary)

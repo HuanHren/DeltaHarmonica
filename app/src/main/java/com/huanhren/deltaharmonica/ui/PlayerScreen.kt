@@ -85,10 +85,13 @@ fun PlayerScreen(activity: Activity, state: AppUiState, model: AppViewModel, onL
             activity.openOverlayPermission()
             return
         }
-        if (model.startPreflight(layout, true)) {
-            calibrated = PlaybackPreparation.controlsConfirmed
-            confirmOpen = true
-        } else advanced = true
+        scope.launch {
+            if (!currentPlaybackControls().canStart) return@launch
+            if (model.startPreflight(layout, true)) {
+                calibrated = PlaybackPreparation.controlsConfirmed
+                confirmOpen = true
+            } else advanced = true
+        }
     }
     fun openSync(start: Boolean) {
         region = runtime.pitchRegion
@@ -347,6 +350,11 @@ private fun PlaybackDiagnostics(model: AppViewModel, progress: PlaybackProgress,
         val count = provenance?.sourceNoteCount?.let { musicNumber(it) } ?: unknown
         val unmapped = provenance?.unmappedCount?.let { musicNumber(it) } ?: unknown
         SupportingText(stringResource(R.string.player_script_metadata, report.script.schemaVersion, count, unmapped))
+        val compatibility = report.compatibility
+        SupportingText(stringResource(compatibility.status.label()), error = compatibility.errors.isNotEmpty())
+        compatibility.errors.forEach { SupportingText(musicDiagnostic(it), error = true) }
+        if (compatibility.unmappedCount > 0)
+            SupportingText(stringResource(R.string.score_unmapped, compatibility.unmappedCount), error = true)
         (report.warnings + workspace.dryRun?.warnings.orEmpty()).distinct().take(100).forEach { SupportingText(musicDiagnostic(it), error = true) }
         workspace.dryRun?.let { plan ->
             plan.fatalErrors.forEach { SupportingText(musicDiagnostic(it), error = true) }

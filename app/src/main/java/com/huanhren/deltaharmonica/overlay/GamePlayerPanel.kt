@@ -2,17 +2,15 @@ package com.huanhren.deltaharmonica.overlay
 
 import android.content.res.ColorStateList
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioManager
 import android.os.Build
 import android.widget.ImageView
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
-import android.widget.BaseAdapter
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ListView
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
@@ -32,6 +30,9 @@ import com.huanhren.deltaharmonica.ui.playbackControls
 import com.huanhren.deltaharmonica.ui.sessionFraction
 import com.huanhren.deltaharmonica.ui.sessionStatus
 import com.huanhren.deltaharmonica.ui.songDuration
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /** The service owns the window and input lifecycle; this panel projects the shared playback state. */
 internal class GamePlayerPanel(
@@ -42,10 +43,13 @@ internal class GamePlayerPanel(
     private val drag: (View, (() -> Unit)?) -> Unit,
     private val onClose: () -> Unit,
     private val onArm: () -> Unit,
+    private val scope: CoroutineScope,
+    private val musicPrefs: MusicCenterPreferences,
+    private val onKeyboard: (Boolean) -> Unit,
     private var displayHeight: Int,
     private val renderBlocked: () -> Boolean = { false },
 ) {
-    private enum class Page { BUBBLE, PLAYER, SONGS, SYNC, CONFIRM }
+    private enum class Page { BUBBLE, PLAYER, MUSIC, SYNC, CONFIRM }
 
     private val context get() = style.context
     val view = FrameLayout(context)
@@ -53,7 +57,9 @@ internal class GamePlayerPanel(
     val minimized get() = page == Page.BUBBLE
     val collapsedWidth get() = maxOf(style.dp(68), style.touchSize)
     val collapsedHeight get() = style.touchSize
-    val preferredWidth get() = maxOf(style.dp(328), style.touchSize * 5 + style.dp(40))
+    val preferredWidth get() = if (page == Page.MUSIC) maxOf(style.dp(405), style.touchSize * 4 + style.dp(40))
+        else maxOf(style.dp(328), style.touchSize * 5 + style.dp(40))
+    val sizingMode get() = page.ordinal
     val screenMargin get() = style.dp(8)
 
     private val workspace get() = model.midiWorkspace
@@ -69,7 +75,9 @@ internal class GamePlayerPanel(
     private var stop: View? = null
     private var lastBusy = false
     private var ownedConfirmation = false
-    private var songList: ListView? = null
+    private var preflightJob: Job? = null
+    private var musicCenter: GameMusicCenter? = null
+    private var volumeValue: TextView? = null
     private var bubbleButton: View? = null
     private var bubbleDot: View? = null
     private var pendingRender = false
@@ -95,7 +103,7 @@ internal class GamePlayerPanel(
     }
 
     fun refresh() {
-        if (minimized) return
+        if (minimized || page == Page.MUSIC) return
         if (page == Page.CONFIRM && PlaybackPreparation.progress.value.phase != PlaybackStatus.CONFIRMING) {
             ownedConfirmation = false
             page = Page.PLAYER
@@ -104,6 +112,13 @@ internal class GamePlayerPanel(
     }
 
     fun dispose() {
+        preflightJob?.cancel()
+        musicCenter?.dispose()
+        musicCenter = null
+        cancelOwnedConfirmation()
+    }
+
+    private fun cancelOwnedConfirmation() {
         if (ownedConfirmation) model.cancelPreflight()
         ownedConfirmation = false
     }
@@ -113,7 +128,7 @@ internal class GamePlayerPanel(
         val busy = !controls.canStart
         val refreshControls = lastBusy != busy
         lastBusy = busy
-        if (refreshControls && !minimized && !ownedConfirmation) {
+        if (refreshControls && !minimized && page != Page.MUSIC && !ownedConfirmation) {
             render()
             return
         }
@@ -160,7 +175,9 @@ internal class GamePlayerPanel(
         !model.imports.state.value.active && !model.libraryBusy.value
 
     private fun open(next: Page) {
-        if (page == Page.CONFIRM && next != Page.CONFIRM) dispose()
+        if (page == Page.CONFIRM && next != Page.CONFIRM) cancelOwnedConfirmation()
+        if (page == Page.MUSIC && next != Page.MUSIC) musicCenter?.hide()
+        if (next == Page.BUBBLE) preflightJob?.cancel()
         val changeSize = minimized != (next == Page.BUBBLE)
         page = next
         localError = null
@@ -177,14 +194,12 @@ internal class GamePlayerPanel(
             return
         }
         pendingRender = false
-        val index = songList?.firstVisiblePosition ?: 0
-        val offset = songList?.getChildAt(0)?.top ?: 0
         status = null
         progressBar = null
         note = null
         start = null
         stop = null
-        songList = null
+        volumeValue = null
         bubbleButton = null
         bubbleDot = null
         view.removeAllViews()
@@ -222,15 +237,22 @@ internal class GamePlayerPanel(
         }
         view.background = style.panelBackground()
         addHeader(card)
+        if (page == Page.MUSIC) {
+            val center = music()
+            val contentHeight = minOf(style.dp(292),
+                (displayHeight - style.touchSize - screenMargin * 2 - card.paddingTop - card.paddingBottom).coerceAtLeast(1))
+            (center.view.parent as? LinearLayout)?.removeView(center.view)
+            card.addView(center.view, LinearLayout.LayoutParams(-1, contentHeight))
+            center.show(duringPlayback = false)
+            view.addView(card, FrameLayout.LayoutParams(-1, -2))
+            onResize()
+            return
+        }
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, style.dp(6), 0, 0)
         }
         when (page) {
-            Page.SONGS -> {
-                addSongs(body)
-                songList?.setSelectionFromTop(index, offset)
-            }
             Page.SYNC -> addSync(body)
             Page.CONFIRM -> addConfirmation(body)
             else -> addPlayer(body)
@@ -244,7 +266,7 @@ internal class GamePlayerPanel(
                 super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(available, MeasureSpec.AT_MOST))
             }
         }
-        scroll.addView(body, ViewGroup.LayoutParams(-1, -2))
+        scroll.addView(body, LinearLayout.LayoutParams(-1, -2))
         card.addView(scroll, LinearLayout.LayoutParams(-1, -2))
         view.addView(card, FrameLayout.LayoutParams(-1, -2))
         lastBusy = !currentPlaybackControls().canStart
@@ -255,7 +277,7 @@ internal class GamePlayerPanel(
     private fun addHeader(card: LinearLayout) {
         val header = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
         val heading = style.text(when (page) {
-            Page.SONGS -> label(R.string.overlay_pick)
+            Page.MUSIC -> label(R.string.game_music_center)
             Page.SYNC -> label(R.string.overlay_sync)
             Page.CONFIRM -> label(R.string.overlay_confirm)
             else -> workspace.name.ifBlank { label(R.string.overlay_none) }
@@ -267,8 +289,10 @@ internal class GamePlayerPanel(
         }
         header.addView(heading, LinearLayout.LayoutParams(0, style.touchSize, 1f))
         drag(heading, null)
-        header.addView(style.button("−", capsule = true, size = 20f) { open(Page.BUBBLE) }.apply {
-            contentDescription = label(R.string.overlay_minimize)
+        header.addView(style.button(if (page == Page.MUSIC) "‹" else "−", capsule = true, size = 20f) {
+            open(if (page == Page.MUSIC) Page.PLAYER else Page.BUBBLE)
+        }.apply {
+            contentDescription = label(if (page == Page.MUSIC) R.string.action_back else R.string.overlay_minimize)
         }, LinearLayout.LayoutParams(style.touchSize, style.touchSize))
         header.addView(style.button("×", capsule = true, size = 20f) {
             dispose()
@@ -318,21 +342,30 @@ internal class GamePlayerPanel(
             progressBackgroundTintList = ColorStateList.valueOf(style.track)
             contentDescription = label(R.string.overlay_progress)
         }.also { body.addView(it, LinearLayout.LayoutParams(-1, style.dp(8))) }
+        localError?.let { body.addView(style.text(label(R.string.overlay_failure_detail, it))) }
         if (layout() == null) body.addView(style.text(label(R.string.overlay_needs_layout)))
         addRow(body) {
-            control(label(R.string.overlay_choose), enabled = allowed()) { open(Page.SONGS) }
+            control(label(R.string.game_music_center), enabled = allowed(), weight = 1.4f) { open(Page.MUSIC) }
             control(label(R.string.overlay_sync_action), enabled = allowed()) { openSync(start = false) }
             start = control(label(R.string.overlay_start), primary = allowed(),
                 enabled = allowed() && workspace.report != null && layout() != null,
-            ) {
-                if (PlaybackPreparation.runtimeState.value.syncStatus == SyncStatus.USER_CONFIRMED) preflight()
-                else openSync(start = true)
-            }
+            ) { beginFromLoadedTrack() }
             val canStop = currentPlaybackControls().canStop
             stop = control(label(R.string.overlay_stop), primary = canStop, stopAction = true, enabled = canStop) {
                 PlaybackPreparation.stopPlayback()
             }
         }
+        addRow(body) {
+            control("‹", enabled = allowed() && adjacentSong(-1) != null) {
+                adjacentSong(-1)?.let { selectTrack(it) }
+            }.contentDescription = label(R.string.game_music_previous)
+            control("›", enabled = allowed() && adjacentSong(1) != null) {
+                adjacentSong(1)?.let { selectTrack(it) }
+            }.contentDescription = label(R.string.game_music_next)
+            control("−", action = { changeVolume(-1) }).contentDescription = label(R.string.game_music_volume_down)
+            control("+", action = { changeVolume(1) }).contentDescription = label(R.string.game_music_volume_up)
+        }
+        volumeValue = style.text(volumeLabel()).also { body.addView(it) }
     }
 
     private fun openSync(start: Boolean) {
@@ -343,71 +376,65 @@ internal class GamePlayerPanel(
         open(Page.SYNC)
     }
 
-    private fun addSongs(body: LinearLayout) {
-        val items = model.songs.items.value
-        val problems = model.songs.problems.value
-        val recent = model.preferences?.recent?.value.orEmpty()
-        val songs = items.sortedWith(compareByDescending<SongLibraryItem> { recent[it.id] ?: Long.MIN_VALUE }
-            .thenByDescending { it.createdAt })
-        val message = when {
-            localError != null -> label(R.string.overlay_failure_detail, localError.orEmpty())
-            model.libraryError.value != null -> label(R.string.overlay_failure_detail, model.libraryError.value.orEmpty())
-            model.libraryBusy.value -> label(R.string.overlay_loading_piece)
-            model.libraryLoading.value -> label(R.string.studio_library_wait)
-            songs.isEmpty() -> label(R.string.overlay_empty_library)
-            else -> context.resources.getQuantityString(R.plurals.overlay_piece_count, songs.size, songs.size)
-        }
-        body.addView(style.text(message))
-        if (songs.isNotEmpty()) {
-            val list = ListView(context).apply {
-                dividerHeight = style.dp(1)
-                isNestedScrollingEnabled = true
-                adapter = object : BaseAdapter() {
-                    override fun getCount() = songs.size
-                    override fun getItem(position: Int) = songs[position]
-                    override fun getItemId(position: Int) = position.toLong()
-                    override fun areAllItemsEnabled() = false
-                    override fun isEnabled(position: Int) = allowed() && getItem(position).id !in problems
-                    override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                        val song = getItem(position)
-                        return ((convertView as? TextView) ?: style.text("", 14f, strong = true).apply {
-                            maxLines = 3
-                            ellipsize = TextUtils.TruncateAt.END
-                            gravity = Gravity.CENTER_VERTICAL
-                            minHeight = style.touchSize
-                            setPadding(style.dp(6), style.dp(3), style.dp(6), style.dp(3))
-                        }).apply {
-                            isSelected = workspace.songId == song.id
-                            val name = if (isSelected) label(R.string.overlay_selected_piece, song.displayName) else song.displayName
-                            val detail = problems[song.id] ?: context.resources.getQuantityString(
-                                R.plurals.overlay_song_meta, song.eventCount, song.eventCount,
-                                song.durationMs?.let(::songDuration) ?: label(R.string.overlay_unknown_duration),
-                            )
-                            text = label(R.string.overlay_song_row, name, detail)
-                        }
-                    }
-                }
-                setOnItemClickListener { _, _, position, _ ->
-                    localError = null
-                    model.activateSong(songs[position].id) { error ->
-                        if (!view.isAttachedToWindow || page != Page.SONGS) return@activateSong
-                        if (error == null) open(Page.PLAYER)
-                        else {
-                            localError = error
-                            render()
-                        }
-                    }
-                }
+    fun music(): GameMusicCenter = musicCenter ?: GameMusicCenter(style, model, scope, musicPrefs, layout, onKeyboard) {
+        open(Page.PLAYER)
+        beginFromLoadedTrack()
+    }.also { musicCenter = it }
+
+    fun prepareForPlayback() {
+        releaseMusicKeyboard()
+        if (page == Page.MUSIC) open(Page.PLAYER)
+    }
+
+    fun releaseMusicKeyboard() {
+        musicCenter?.releaseKeyboard()
+    }
+
+    fun adjacentSong(step: Int): String? {
+        val ids = model.songs.items.value.filterNot { it.id in model.songs.problems.value }.map(SongLibraryItem::id)
+        return adjacentTrack(ids, workspace.songId, step)
+    }
+
+    fun selectTrack(id: String, play: Boolean = false) {
+        if (!allowed()) return
+        model.activateSong(id) { error ->
+            if (!view.isAttachedToWindow) return@activateSong
+            if (error == null) {
+                open(Page.PLAYER)
+                if (play) beginFromLoadedTrack()
+            } else {
+                localError = error
+                render()
             }
-            songList = list
-            val available = (displayHeight - style.touchSize * 2 - style.dp(64)).coerceAtLeast(style.touchSize)
-            val listHeight = minOf(style.dp(200), available, style.touchSize * songs.size.coerceAtMost(5))
-            body.addView(list, LinearLayout.LayoutParams(-1, listHeight))
         }
-        addRow(body) {
-            control(label(R.string.action_back)) { open(Page.PLAYER) }
-            if (model.libraryError.value != null) control(label(R.string.retry)) { model.refreshLibrary() }
+    }
+
+    private fun beginFromLoadedTrack() {
+        val unmapped = workspace.report?.compatibility?.unmappedCount ?: 0
+        if (unmapped > 0) {
+            localError = label(R.string.game_music_unmapped, unmapped)
+            render()
+            return
         }
+        if (PlaybackPreparation.runtimeState.value.syncStatus == SyncStatus.USER_CONFIRMED) preflight()
+        else openSync(start = true)
+    }
+
+    private fun volumeManager() = context.getSystemService(AudioManager::class.java)
+
+    fun volumeLabel(): String {
+        val audio = volumeManager()
+        val percent = if (audio == null) 0 else runCatching {
+            audio.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 /
+                audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+        }.getOrDefault(0)
+        return label(R.string.game_music_volume_percent, percent)
+    }
+
+    fun changeVolume(step: Int) {
+        val direction = if (step > 0) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER
+        runCatching { volumeManager()?.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, 0) }
+        volumeValue?.text = volumeLabel()
     }
 
     private fun addSync(body: LinearLayout) {
@@ -442,10 +469,13 @@ internal class GamePlayerPanel(
     }
 
     private fun preflight() {
-        if (model.startPreflight(layout(), Settings.canDrawOverlays(context))) {
-            calibrated = PlaybackPreparation.controlsConfirmed
-            ownedConfirmation = true
-            open(Page.CONFIRM)
+        if (preflightJob?.isActive == true) return
+        preflightJob = scope.launch {
+            if (model.startPreflight(layout(), Settings.canDrawOverlays(context))) {
+                calibrated = PlaybackPreparation.controlsConfirmed
+                ownedConfirmation = true
+                open(Page.CONFIRM)
+            }
         }
     }
 

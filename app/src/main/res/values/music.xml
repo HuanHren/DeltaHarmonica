@@ -108,7 +108,7 @@
     <string name="player_ms_control">%1$s %2$d ms</string>
     <string name="import_title">导入曲目</string>
     <string name="import_from_file">从文件添加</string>
-    <string name="import_from_file_detail">MIDI 可选择旋律轨道后转换。JSON 演奏脚本可直接加入曲库。</string>
+    <string name="import_from_file_detail">可导入 MIDI、RMID、含单首 MIDI 的 ZIP、JSON 演奏脚本和 DFHS1 曲谱。</string>
     <string name="import_pick_file">选择 MIDI / JSON 文件</string>
     <string name="import_midi_meta">MIDI Type %1$d · %2$d 条轨道 · %3$s</string>
     <string name="import_track">轨道 %1$d</string>

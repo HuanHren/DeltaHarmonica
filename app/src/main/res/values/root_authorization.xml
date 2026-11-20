@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="root_preferences">Root 授权管理</string>
+    <string name="root_environment">Root 环境</string>
+    <string name="root_environment_visible">发现可执行的 su</string>
+    <string name="root_environment_not_found">未检测到 su</string>
+    <string name="root_manager">Root 管理器</string>
+    <string name="root_manager_unknown">未识别管理器</string>
+    <string name="root_authorization">当前授权</string>
+    <string name="root_state_unknown">尚未检测</string>
+    <string name="root_state_not_authorized">尚未验证授权</string>
+    <string name="root_state_cached">上次验证成功，使用时复核</string>
+    <string name="root_state_authorized">已验证 Root UID</string>
+    <string name="root_state_denied">Root 请求被拒绝</string>
+    <string name="root_state_revoked">原有 Root 授权已失效</string>
+    <string name="root_state_manager_unavailable">Root 管理器或 su 不可用</string>
+    <string name="root_state_recheck">状态已变化，请重新检查授权</string>
+    <string name="root_state_error">Root 验证失败</string>
+    <string name="root_input_readiness">Root 输入后端</string>
+    <string name="root_input_pending">等待首次输入初始化</string>
+    <string name="root_input_ready">已成功初始化</string>
+    <string name="root_input_unavailable">输入初始化或命令执行失败</string>
+    <string name="root_current_backend">当前可用后端</string>
+    <string name="root_no_usable_backend">当前没有就绪的输入后端</string>
+    <string name="root_detect_environment">检测设备环境</string>
+    <string name="root_request_authorization">检查或重新申请 Root 授权</string>
+    <string name="root_preferred_backend">首选输入后端</string>
+</resources>

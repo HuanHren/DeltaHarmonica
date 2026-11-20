@@ -82,7 +82,7 @@ fun TestScreen(state: AppUiState, activity: Activity,
                     }
                     PrimaryButton(stringResource(R.string.touch_test_start), {
                         if (geometry != null && selected != null) onTest(selected.id, geometry.display) { displaySnapshot(activity) }
-                    }, enabled = compatible && selected != null && state.selectedBackendStatus?.available == true)
+                    }, enabled = compatible && selected != null && state.canTestSelectedInput)
                     Text(testMessage)
                     Text(touchHitMessage(state.hitMessage, layout?.targets.orEmpty()), style = StudioTheme.typography.titleMedium)
                     SupportingText(stringResource(R.string.music_backend_status, state.selectedBackend,

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.ContentResolver
 import android.net.Uri
+import android.util.Log
 import com.huanhren.deltaharmonica.playback.*
 import com.huanhren.deltaharmonica.data.DocumentTransfer
 import com.huanhren.deltaharmonica.data.ImportCoordinator
@@ -40,6 +41,13 @@ internal data class OnlineConversionOptions(val policy: MonophonyPolicy, val tra
 
 internal class OnlineSongException(message: String, cause: Exception? = null) : IllegalStateException(message, cause)
 
+private const val SCORE_TIMING_TAG = "DeltaScore"
+
+private fun logScoreTiming(operation: String, startedNs: Long) {
+    if (Log.isLoggable(SCORE_TIMING_TAG, Log.DEBUG))
+        Log.println(Log.DEBUG, SCORE_TIMING_TAG, "$operation ms=${(System.nanoTime() - startedNs) / 1_000_000}")
+}
+
 data class AppUiState(
     val loading: Boolean = true,
     val loadError: String? = null,
@@ -50,12 +58,14 @@ data class AppUiState(
     val message: String = "",
     val backends: List<Pair<String, BackendStatus>> = emptyList(),
     val selectedBackend: String = "Root",
+    val preferredBackend: String = selectedBackend,
     val checkingRoot: Boolean = false,
     val enablingAccessibility: Boolean = false,
     val accessibilityGrantMessage: String = "",
     val testing: Boolean = false,
     val testMessage: String = "尚未测试",
     val hitMessage: String = "尚未收到测试触摸",
+    val canTestSelectedInput: Boolean = false,
 ) {
     val dirty: Boolean get() = draft != saved
     val selected: TouchTarget? get() = draft?.targets?.find { it.id == selectedId }
@@ -106,6 +116,33 @@ class AppViewModel(
         loadLibrarySong(songs, id, midiWorkspace, state.value.saved)
     }
 
+    internal suspend fun inspectOnlineSong(
+        score: OnlineScore,
+        layout: InstrumentLayout?,
+        options: OnlineConversionOptions = OnlineConversionOptions(midiWorkspace.candidatePolicy, midiWorkspace.candidateTranspose),
+    ): SongCompatibilityReport {
+        val conversionLayout = state.value.saved ?: layout ?: state.value.draft ?: DefaultLayouts.create()
+        return try {
+            convertOnlineScore(score, options, conversionLayout).second.compatibility
+        } catch (e: IllegalArgumentException) {
+            SongCompatibilityAnalyzer.failed(ScoreFormat.DFHS1, e.localizedMessage ?: "曲谱损坏或无法转换")
+        }
+    }
+
+    private suspend fun convertOnlineScore(
+        score: OnlineScore,
+        options: OnlineConversionOptions,
+        layout: InstrumentLayout,
+    ): Pair<ByteArray, ConversionReport> = withContext(Dispatchers.Default) {
+        val started = System.nanoTime()
+        val bytes = DfhsDecoder.decodeBase64(score.payload)
+        val report = OnlineSongConverter.convertCompressed(bytes, "${score.entry.title}.dfhs",
+            options.policy, options.transpose, layout.profile ?: DefaultProfiles.delta(), layout) { ensureActive() }
+        require(report.compatibility.sourceNoteCount == score.entry.noteCount) { "曲谱与详情中的音符数不一致" }
+        logScoreTiming("online_decode_convert", started)
+        bytes to report
+    }
+
     internal suspend fun prepareOnlineSong(
         entry: OnlineEntry,
         score: OnlineScore?,
@@ -116,40 +153,33 @@ class AppViewModel(
         update: Boolean = false,
         options: OnlineConversionOptions? = null,
     ): SongLibraryItem {
-        if (!currentPlaybackControls().canStart || midiWorkspace.stateDialog || midiWorkspace.confirmPlayback ||
+        if ((play && (!currentPlaybackControls().canStart || midiWorkspace.stateDialog || midiWorkspace.confirmPlayback)) ||
             imports.state.value.active ||
             !mutableLibraryBusy.compareAndSet(expect = false, update = true)) {
             throw OnlineSongException("请先结束当前演奏或曲目操作")
         }
         try {
+            val defaultOptions = OnlineConversionOptions(midiWorkspace.candidatePolicy, midiWorkspace.candidateTranspose)
+            val conversionLayout = state.value.saved ?: layout ?: state.value.draft ?: DefaultLayouts.create()
             val existing = songs.findOnline(entry.id)
             val item = if (existing != null && !update) existing else {
                 val storedPolicy = MonophonyPolicy.entries.firstOrNull { it.name == existing?.monophonyPolicy }
-                val policy = options?.policy ?: storedPolicy ?: midiWorkspace.candidatePolicy
-                val userTranspose = options?.transpose ?: existing?.online?.userTranspose ?: midiWorkspace.candidateTranspose
+                val policy = options?.policy ?: storedPolicy ?: defaultOptions.policy
+                val userTranspose = options?.transpose ?: existing?.online?.userTranspose ?: defaultOptions.transpose
                 onStage(OnlineSongStage.DOWNLOADING)
                 val selected = score?.takeIf { !update && it.entry.id == entry.id }
                     ?: onlineLibrary.detail(entry.id, force = update, onProgress = onProgress)
                 if (update && selected.stale) throw OnlineSongException("暂时无法取得新版曲谱，请联网后重试")
                 onStage(OnlineSongStage.CONVERTING)
-                val conversionLayout = state.value.saved ?: layout ?: state.value.draft ?: DefaultLayouts.create()
-                val (original, report, sourceTranspose) = withContext(Dispatchers.Default) {
-                    try {
-                        val bytes = DfhsDecoder.decodeBase64(selected.payload)
-                        val decoded = DfhsDecoder.decode(bytes) { ensureActive() }
-                        require(decoded.notes.size == selected.entry.noteCount) { "曲谱与详情中的音符数不一致" }
-                        val conversion = OnlineSongConverter.convert(decoded, "${selected.entry.title}.dfhs",
-                            policy, userTranspose, conversionLayout.profile ?: DefaultProfiles.delta(),
-                            conversionLayout) { ensureActive() }
-                        Triple(bytes, conversion, decoded.transpose)
-                    } catch (e: IllegalArgumentException) {
-                        throw OnlineSongException(e.localizedMessage ?: "曲谱损坏或无法转换", e)
-                    }
+                val (original, report) = try {
+                    convertOnlineScore(selected, OnlineConversionOptions(policy, userTranspose), conversionLayout)
+                } catch (e: IllegalArgumentException) {
+                    throw OnlineSongException(e.localizedMessage ?: "曲谱损坏或无法转换", e)
                 }
                 val meta = selected.entry
                 val origin = OnlineSongOrigin(meta.id, meta.updatedAt, composer = meta.composer, uploader = meta.uploader,
                     tags = meta.tags, bpm = meta.bpm, difficulty = meta.difficulty, remoteDurationMs = meta.durationMs,
-                    noteCount = meta.noteCount, sourceTranspose = sourceTranspose, userTranspose = userTranspose)
+                    noteCount = meta.noteCount, sourceTranspose = report.script.transpose - userTranspose, userTranspose = userTranspose)
                 onStage(OnlineSongStage.SAVING)
                 try {
                     songs.addOnline(meta.title, original, report.script, report.warnings, origin, allowNewRevision = update)
@@ -204,7 +234,7 @@ class AppViewModel(
         }
     }
 
-    fun startPreflight(layout: InstrumentLayout?, overlayAllowed: Boolean): Boolean {
+    suspend fun startPreflight(layout: InstrumentLayout?, overlayAllowed: Boolean): Boolean {
         if (!currentPlaybackControls().canStart || imports.state.value.active || mutableLibraryBusy.value) return false
         val workspace = midiWorkspace
         val script = workspace.report?.script ?: return false
@@ -212,7 +242,8 @@ class AppViewModel(
         PlaybackPreparation.clearCompletedHistory()
         workspace.dryRun = null
         PlaybackPreparation.pending = null
-        PlaybackPreparation.progress.value = PlaybackProgress(count, state = "正在检查脚本", phase = PlaybackStatus.CHECKING)
+        val checking = PlaybackProgress(count, state = "正在检查脚本", phase = PlaybackStatus.CHECKING)
+        PlaybackPreparation.progress.value = checking
         return try {
             require(rootUiAllowed) { "隔离测试宿主不执行演奏" }
             require(overlayAllowed) { "请先授权悬浮窗" }
@@ -221,17 +252,34 @@ class AppViewModel(
             require(!rootBackend.releaseUncertain) { "上次 Root 触摸释放待确认，请检查游戏状态" }
             val runtime = PlaybackPreparation.runtimeState.value
             require(runtime.syncStatus == SyncStatus.USER_CONFIRMED) { "请先同步游戏音区与半音" }
-            val plan = PlaybackPlanner.plan(script, requireNotNull(layout) { "请先保存校准布局" },
-                runtime.pitchRegion, runtime.semitoneEnabled, 0, count, workspace.speed, combined = workspace.combinedMode,
-                minimumTouchMs = workspace.minimumTouchMs, combinedLeadMs = workspace.combinedLeadMs)
+            val calibratedLayout = requireNotNull(layout) { "请先保存校准布局" }
+            val savedLayout = state.value.saved
+            val speed = workspace.speed
+            val combined = workspace.combinedMode
+            val minimumTouchMs = workspace.minimumTouchMs
+            val combinedLeadMs = workspace.combinedLeadMs
+            val planStarted = System.nanoTime()
+            val plan = withContext(Dispatchers.Default) {
+                PlaybackPlanner.plan(script, calibratedLayout, runtime.pitchRegion, runtime.semitoneEnabled,
+                    0, count, speed, combined = combined, minimumTouchMs = minimumTouchMs, combinedLeadMs = combinedLeadMs,
+                    checkActive = { ensureActive() })
+            }
+            logScoreTiming("playback_plan", planStarted)
+            if (PlaybackPreparation.progress.value !== checking) return false
+            require(workspace.report?.script === script && state.value.saved === savedLayout &&
+                PlaybackPreparation.runtimeState.value == runtime) { "曲谱、布局或游戏状态已变化，请重新预检" }
             workspace.dryRun = plan
             require(plan.events.size == count && count > 0 && plan.fatalErrors.isEmpty()) {
                 plan.fatalErrors.firstOrNull() ?: "选定范围没有完整的可播放事件"
             }
             PlaybackPreparation.progress.value = PlaybackProgress(count, state = "等待确认演奏", phase = PlaybackStatus.CONFIRMING)
             true
+        } catch (e: CancellationException) {
+            if (PlaybackPreparation.progress.value === checking) PlaybackPreparation.progress.value = PlaybackProgress()
+            throw e
         } catch (e: Exception) {
-            PlaybackPreparation.progress.value = PlaybackProgress(count, state = "预检失败：${e.localizedMessage}", phase = PlaybackStatus.FAILED)
+            if (PlaybackPreparation.progress.value === checking)
+                PlaybackPreparation.progress.value = PlaybackProgress(count, state = "预检失败：${e.localizedMessage}", phase = PlaybackStatus.FAILED)
             false
         }
     }
@@ -279,17 +327,20 @@ class AppViewModel(
     }
     val imports = ImportCoordinator(viewModelScope)
 
-    private val importPipeline = ImportPipeline(songs, midiWorkspace, imports)
+    private val importPipeline = ImportPipeline(songs, midiWorkspace, imports,
+        activate = { loadLibrarySong(songs, it, midiWorkspace, state.value.saved) },
+        selectedLayout = { state.value.saved }, recordTiming = ::logScoreTiming)
     fun importDocument(uri: Uri): Boolean = !libraryBusy.value &&
         importPipeline.importDocument { DocumentTransfer.read(resolver, uri) }
     fun convertMidi(layout: InstrumentLayout?): Boolean = !libraryBusy.value && importPipeline.convertMidi(layout)
-    private val mutableState = MutableStateFlow(AppUiState(selectedBackend =
-        if (accessibilityBackend.status().availability != BackendAvailability.NOT_ENABLED) "Accessibility" else "Root"))
+    private var preferredBackend = if (rootUiAllowed && preferences?.inputBackend?.value == "Root") "Root" else "Accessibility"
+    internal val rootAuthorization get() = rootBackend.authorization.state
+    private val mutableState = MutableStateFlow(AppUiState(selectedBackend = preferredBackend))
     val state = mutableState.asStateFlow()
     private var testJob: Job? = null
 
     init {
-        rootBackend.preferred = state.value.selectedBackend == "Root"
+        refreshBackends()
         load()
         refreshLibrary()
         viewModelScope.launch {
@@ -303,24 +354,53 @@ class AppViewModel(
             }
         }
         viewModelScope.launch { AccessibilityConnection.connected.collect { refreshBackends() } }
+        if (rootUiAllowed) viewModelScope.launch { rootAuthorization.collect { refreshBackends() } }
     }
 
     fun refreshBackends() {
-        mutableState.update { it.copy(backends = allBackends.map { backend -> backend.name to backend.status() }) }
+        val useRoot = rootUiAllowed && preferredBackend == "Root" && rootAuthorization.value.canAttemptUse &&
+            !rootBackend.releaseUncertain
+        val active = if (useRoot) "Root" else "Accessibility"
+        val backends = allBackends.map { backend -> backend.name to backend.status() }
+        rootBackend.preferred = useRoot
+        mutableState.update {
+            it.copy(
+                backends = backends,
+                selectedBackend = active,
+                preferredBackend = preferredBackend,
+                canTestSelectedInput = if (useRoot) !rootAuthorization.value.checking
+                else backends.any { (name, status) -> name == active && status.available },
+            )
+        }
     }
 
     fun selectBackend(name: String) {
         val backend = allBackends.firstOrNull { it.name == name } ?: return
-        if (backend.status().availability == BackendAvailability.NOT_IMPLEMENTED || state.value.testing) return
-        rootBackend.preferred = name == "Root"
-        mutableState.update { it.copy(selectedBackend = name) }
+        if ((name != "Root" && name != "Accessibility") || name == "Root" && !rootUiAllowed ||
+            backend.status().availability == BackendAvailability.NOT_IMPLEMENTED || state.value.testing
+        ) return
+        preferredBackend = name
+        preferences?.setInputBackend(name)
+        refreshBackends()
+        if (name == "Root" &&
+            rootAuthorization.value.authorization in setOf(RootAuthorizationState.UNKNOWN, RootAuthorizationState.NOT_AUTHORIZED)
+        ) launchRootCheck(explicit = false)
     }
 
-    fun checkRoot() {
+    fun checkRoot() = launchRootCheck(explicit = true)
+
+    internal fun detectRootEnvironment() {
+        if (!rootUiAllowed || state.value.checkingRoot) return
+        viewModelScope.launch { rootBackend.authorization.refreshEnvironment() }
+    }
+
+    private fun launchRootCheck(explicit: Boolean) {
         if (!rootUiAllowed || state.value.checkingRoot) return
         mutableState.update { it.copy(checkingRoot = true) }
         viewModelScope.launch {
-            try { rootBackend.checkAccess() } finally {
+            try {
+                if (explicit) rootBackend.checkAccess() else rootBackend.checkAccessForUse()
+            } finally {
                 mutableState.update { it.copy(checkingRoot = false) }
                 refreshBackends()
             }
@@ -337,8 +417,7 @@ class AppViewModel(
                 when (val result = rootBackend.enableAccessibility(existing, accessibilityBackend.componentName, reconnect,
                     accessibilityBackend.isSystemUser)) {
                     is RootCommandResult.Success -> {
-                        rootBackend.preferred = false
-                        mutableState.update { it.copy(selectedBackend = "Accessibility") }
+                        selectBackend("Accessibility")
                         repeat(20) {
                             refreshBackends()
                             if (accessibilityBackend.status().available) {
@@ -430,9 +509,13 @@ class AppViewModel(
         if (state.value.testing) return
         val layout = state.value.saved ?: return
         val target = layout.targets.find { it.id == targetId } ?: return
-        val inputBackend = allBackends.firstOrNull { it.name == state.value.selectedBackend } ?: return
-        if (!inputBackend.status().available) {
-            mutableState.update { it.copy(testMessage = inputBackend.status().message) }
+        if (rootBackend.releaseUncertain) {
+            mutableState.update { it.copy(testMessage = rootBackend.status().message) }
+            return
+        }
+        val requested = allBackends.firstOrNull { it.name == state.value.selectedBackend } ?: return
+        if (requested !== rootBackend && !requested.status().available) {
+            mutableState.update { it.copy(testMessage = requested.status().message) }
             return
         }
         if (!before.supported || before.size.orientation != layout.orientation) {
@@ -442,6 +525,13 @@ class AppViewModel(
         mutableState.update { it.copy(testing = true, hitMessage = "等待测试触摸…") }
         testJob = viewModelScope.launch {
             try {
+                val inputBackend = if (requested === rootBackend && !rootBackend.checkAccessForUse().available) {
+                    if (!accessibilityBackend.status().available) {
+                        mutableState.update { it.copy(testMessage = rootBackend.status().message) }
+                        return@launch
+                    }
+                    accessibilityBackend
+                } else requested
                 for (seconds in 3 downTo 1) {
                     mutableState.update { it.copy(testMessage = "$seconds 秒后测试 ${target.label}；返回可取消") }
                     delay(1_000)

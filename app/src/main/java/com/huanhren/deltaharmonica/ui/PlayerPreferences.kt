@@ -33,6 +33,10 @@ class PlayerPreferences(context: Context) {
     val range = mutableRange.asStateFlow()
     private val mutableSpeed = MutableStateFlow(if (storage.getBoolean("fast", false)) 2.0 else 1.0)
     val speed = mutableSpeed.asStateFlow()
+    private val mutableInputBackend = MutableStateFlow(
+        storage.getString("input_backend", null)?.takeIf { it == "Root" || it == "Accessibility" },
+    )
+    internal val inputBackend = mutableInputBackend.asStateFlow()
     private val mutableVolumeStop = MutableStateFlow(storage.getBoolean("volume_stop", true))
     val volumeStop = mutableVolumeStop.asStateFlow()
     private val mutableVolumePause = MutableStateFlow(storage.getBoolean("accessibility_volume_pause", false))
@@ -74,6 +78,12 @@ class PlayerPreferences(context: Context) {
         require(speed == 1.0 || speed == 2.0)
         storage.edit().putBoolean("fast", speed == 2.0).apply()
         mutableSpeed.value = speed
+    }
+
+    internal fun setInputBackend(name: String) {
+        require(name == "Root" || name == "Accessibility")
+        storage.edit().putString("input_backend", name).apply()
+        mutableInputBackend.value = name
     }
 
     fun setVolumeStop(enabled: Boolean) {

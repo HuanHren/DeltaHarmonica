@@ -48,6 +48,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.huanhren.deltaharmonica.R
 import com.huanhren.deltaharmonica.midi.MonophonyPolicy
+import com.huanhren.deltaharmonica.midi.SongCompatibilityReport
+import com.huanhren.deltaharmonica.midi.SongCompatibility
 import com.huanhren.deltaharmonica.model.InstrumentLayout
 import com.huanhren.deltaharmonica.online.OnlineCatalog
 import com.huanhren.deltaharmonica.online.OnlineEntry
@@ -82,6 +84,7 @@ import java.text.NumberFormat
 private const val PAGE_SIZE = 30
 private typealias OnlineProgress = (Long, Long?) -> Unit
 private typealias LoadOnlineDetail = suspend (String, Boolean, OnlineProgress) -> OnlineScore
+private typealias InspectOnlineScore = suspend (OnlineScore, OnlineConversionOptions) -> SongCompatibilityReport
 private typealias PrepareOnlineSong = suspend (
     OnlineEntry, OnlineScore?, Boolean, Boolean, (OnlineSongStage) -> Unit, OnlineProgress, OnlineConversionOptions?,
 ) -> Unit
@@ -131,6 +134,7 @@ internal fun OnlineLibraryScreen(
         prepare = { entry, score, play, update, stage, receive, options ->
             model.prepareOnlineSong(entry, score, layout, play, stage, receive, update, options)
         },
+        inspect = { score, options -> model.inspectOnlineSong(score, layout, options) },
         onBack = onBack,
         onPlay = onPlay,
     )
@@ -148,6 +152,7 @@ internal fun OnlineLibraryContent(
     onPlay: () -> Unit,
     localLoading: Boolean = false,
     defaultOptions: OnlineConversionOptions = OnlineConversionOptions(MonophonyPolicy.HIGHEST_NOTE, 0),
+    inspect: InspectOnlineScore? = null,
 ) {
     val scope = rememberCoroutineScope()
     var catalog by remember { mutableStateOf<OnlineCatalog?>(null) }
@@ -213,7 +218,7 @@ internal fun OnlineLibraryContent(
         if (detail != null) {
             key(detail.id) {
                 OnlineDetailScreen(detail, downloaded[detail.id], localLoading, canPrepare,
-                    defaultOptions, loadDetail, prepare, closeDetail, onPlay)
+                    defaultOptions, loadDetail, prepare, closeDetail, onPlay, inspect)
             }
         } else {
             val keyboard = LocalSoftwareKeyboardController.current
@@ -425,6 +430,7 @@ private fun OnlineDetailScreen(
     prepare: PrepareOnlineSong,
     onBack: () -> Unit,
     onPlay: () -> Unit,
+    inspect: InspectOnlineScore?,
 ) {
     val scope = rememberCoroutineScope()
     val downloaded = local != null
@@ -442,6 +448,11 @@ private fun OnlineDetailScreen(
     var transferPercent by remember { mutableStateOf<Int?>(null) }
     var actionError by remember { mutableStateOf<Exception?>(null) }
     var failedAction by remember { mutableStateOf<PrepareAction?>(null) }
+    val compatibility by produceState<SongCompatibilityReport?>(null, detail, chosen) {
+        value = null
+        val score = detail
+        if (inspect != null && score != null) value = inspect(score, chosen)
+    }
 
     LaunchedEffect(entry.id, downloaded, localLoading, detailAttempt) {
         if (downloaded) {
@@ -581,6 +592,19 @@ private fun OnlineDetailScreen(
                         modifier = Modifier.testTag("online/conversion-options"), enabled = canPrepare && stage == null,
                         onClick = { editing = chosen })
                     if (!canPrepare && stage == null) SupportingText(stringResource(R.string.online_play_blocked))
+                }
+            }
+            if (inspect != null && detail != null) item(key = "compatibility") {
+                ProductCard {
+                    val report = compatibility
+                    if (report == null) SupportingText(stringResource(R.string.score_compatibility_checking))
+                    else {
+                        val invalid = report.status == SongCompatibility.INCOMPATIBLE
+                        SupportingText(stringResource(report.status.label()), error = invalid)
+                        report.errors.forEach { SupportingText(musicDiagnostic(it), error = true) }
+                        if (report.unmappedCount > 0)
+                            SupportingText(stringResource(R.string.score_unmapped, report.unmappedCount), error = true)
+                    }
                 }
             }
             item(key = "metadata") { OnlineDetails(current) }

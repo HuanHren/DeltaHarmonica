@@ -21,8 +21,9 @@ internal class GameSessionBar(
     onTogglePause: () -> Unit,
     onStop: () -> Unit,
     onToggleDetails: () -> Unit,
+    onToggleMusic: (() -> Unit)? = null,
 ) {
-    val compactWidth = 3 * style.touchSize
+    val compactWidth = (if (onToggleMusic != null) 4 else 3) * style.touchSize
     val compactHeight = style.touchSize
     val expandedWidth = maxOf(compactWidth, style.dp(264))
     val expandedHeight = style.touchSize + style.dp((76 * style.context.resources.configuration.fontScale.coerceAtLeast(1f)).toInt())
@@ -32,6 +33,11 @@ internal class GameSessionBar(
         background = style.panelBackground()
     }
     private val detailsToggle = style.button("⌄", capsule = true, size = 18f, action = onToggleDetails)
+    private val music = onToggleMusic?.let { action ->
+        style.button("♫", capsule = true, size = 18f, action = action).apply {
+            contentDescription = label(R.string.game_music_center)
+        }
+    }
     private val pause = style.button("Ⅱ", capsule = true, size = 18f, action = onTogglePause)
     private val stop = style.button("■", capsule = true, size = 14f, action = onStop)
     private val info = LinearLayout(style.context).apply {
@@ -56,7 +62,7 @@ internal class GameSessionBar(
     init {
         val controls = LinearLayout(style.context).apply {
             gravity = Gravity.CENTER_VERTICAL
-            listOf(detailsToggle, pause, stop).forEach { addView(it, LinearLayout.LayoutParams(0, style.touchSize, 1f)) }
+            listOfNotNull(detailsToggle, music, pause, stop).forEach { addView(it, LinearLayout.LayoutParams(0, style.touchSize, 1f)) }
         }
         stop.contentDescription = label(R.string.overlay_stop)
         view.addView(controls, LinearLayout.LayoutParams(-1, compactHeight))
@@ -78,12 +84,13 @@ internal class GameSessionBar(
         detailsToggle.contentDescription = label(if (value) R.string.overlay_minimize else R.string.overlay_expand)
     }
 
-    fun update(progress: PlaybackProgress, canExpand: Boolean, canPause: Boolean) {
+    fun update(progress: PlaybackProgress, canExpand: Boolean, canPause: Boolean, canUseMusic: Boolean = false) {
         val paused = progress.phase == PlaybackStatus.PAUSED
         pause.text = if (paused) "▶" else "Ⅱ"
         pause.contentDescription = label(if (paused) R.string.session_resume else R.string.session_pause)
         pause.isEnabled = canPause && (paused || progress.phase == PlaybackStatus.PLAYING)
         detailsToggle.isEnabled = paused && canExpand
+        music?.isEnabled = canUseMusic
         stop.isEnabled = progress.phase != PlaybackStatus.STOPPING
         if (expanded) {
             val phase = label(sessionStatus(progress))

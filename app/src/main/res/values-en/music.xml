@@ -108,7 +108,7 @@
     <string name="player_ms_control">%1$s %2$d ms</string>
     <string name="import_title">Import track</string>
     <string name="import_from_file">Add from a file</string>
-    <string name="import_from_file_detail">Choose a melody track to convert from MIDI, or add a JSON performance script directly to your library.</string>
+    <string name="import_from_file_detail">Import MIDI, RMID, a ZIP with one MIDI file, a JSON performance script, or a DFHS1 score.</string>
     <string name="import_pick_file">Choose MIDI or JSON file</string>
     <string name="import_midi_meta">MIDI Type %1$d · Tracks %2$d · %3$s</string>
     <string name="import_track">Track %1$d</string>

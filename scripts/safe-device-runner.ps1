@@ -109,6 +109,9 @@ try {
         if ($LASTEXITCODE -ne 0 -or ($tree -match '^\s+A: (split=|android:sharedUserId)')) {
             throw 'Split or shared UID APKs are forbidden'
         }
+        if ($tree -match 'android.permission.(REQUEST_INSTALL_PACKAGES|MODIFY_AUDIO_SETTINGS)|\.update\.UpdateFileProvider"') {
+            throw 'Isolated APKs cannot install updates or alter system audio volume'
+        }
         # AndroidX test support has category-only filters for its explicit helper activities.
         $filters = [regex]::Matches(($tree -join "`n"), '(?m)^([ ]*)E: intent-filter\b[^\r\n]*(?:\r?\n\1[ ]+[^\r\n]*)*')
         if ($filters | Where-Object {
@@ -174,7 +177,7 @@ try {
         $liveArguments = @()
         if ($LiveOnlineLibrary) {
             $classes += 'OnlineLibraryLiveDeviceSmokeTest'
-            $expectedCount += 1
+            $expectedCount += 2
             $liveArguments = @('-e','liveOnlineLibrary','true')
         }
         $selection = ($classes | ForEach-Object { "com.huanhren.deltaharmonica.$_" }) -join ','

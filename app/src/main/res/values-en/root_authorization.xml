@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="root_preferences">Root authorization</string>
+    <string name="root_environment">Root environment</string>
+    <string name="root_environment_visible">Executable su found</string>
+    <string name="root_environment_not_found">su not detected</string>
+    <string name="root_manager">Root manager</string>
+    <string name="root_manager_unknown">Manager not identified</string>
+    <string name="root_authorization">Authorization</string>
+    <string name="root_state_unknown">Not checked</string>
+    <string name="root_state_not_authorized">Authorization unverified</string>
+    <string name="root_state_cached">Last check passed. Verify when needed</string>
+    <string name="root_state_authorized">Root UID verified</string>
+    <string name="root_state_denied">Root request denied</string>
+    <string name="root_state_revoked">Previous Root access no longer works</string>
+    <string name="root_state_manager_unavailable">Root manager or su unavailable</string>
+    <string name="root_state_recheck">Status changed. Check authorization again</string>
+    <string name="root_state_error">Root verification failed</string>
+    <string name="root_input_readiness">Root input backend</string>
+    <string name="root_input_pending">Waiting for input initialization</string>
+    <string name="root_input_ready">Initialized</string>
+    <string name="root_input_unavailable">Input initialization or command failed</string>
+    <string name="root_current_backend">Available backend</string>
+    <string name="root_no_usable_backend">No input backend ready</string>
+    <string name="root_detect_environment">Check device environment</string>
+    <string name="root_request_authorization">Check or request Root access</string>
+    <string name="root_preferred_backend">Preferred input backend</string>
+</resources>

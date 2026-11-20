@@ -205,7 +205,7 @@ internal fun LibraryScreen(model: AppViewModel, onImport: () -> Unit, onPlayer: 
         }
     }
     if (filters) ProductSheet(stringResource(R.string.library_filters), { filters = false }) {
-        val sources = listOf(null, SongSourceType.MIDI, SongSourceType.JSON, SongSourceType.ONLINE_DFHS)
+        val sources = listOf(null) + SongSourceType.entries
         val sourceNames = sources.map { stringResource(it?.let(::sourceLabel) ?: R.string.library_source_all) }
         Choices(sources, source, { sourceNames[sources.indexOf(it)] }, { source = it })
         val sortNames = SongSort.entries.map {
@@ -253,6 +253,7 @@ private fun sourceLabel(type: SongSourceType) = when (type) {
     SongSourceType.MIDI -> R.string.library_source_midi
     SongSourceType.JSON -> R.string.library_source_json
     SongSourceType.ONLINE_DFHS -> R.string.online_source_downloaded
+    SongSourceType.LOCAL_DFHS -> R.string.library_source_dfhs
 }
 
 @Composable

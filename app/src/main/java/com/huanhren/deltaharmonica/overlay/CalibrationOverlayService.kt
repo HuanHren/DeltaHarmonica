@@ -18,8 +18,10 @@ import android.provider.Settings
 import android.view.Choreographer
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ViewGroup
 import android.view.View
 import android.view.WindowManager
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import com.huanhren.deltaharmonica.DeltaHarmonicaApp
@@ -64,7 +66,10 @@ class CalibrationOverlayService : Service() {
     private var calibrationBackendAvailable = false
     private var calibrationTesting = false
     private var activePanelDrag: OverlayDrag? = null
-    private var gameCollapsed = true
+    private var gameSizingMode = -1
+    private val musicPrefs by lazy { MusicCenterPreferences(this) }
+    private var sessionMusicView: View? = null
+    private var closeAfterPlayback = false
     private var gameTargetWidth = 0
     private var gameTargetHeight = 0
     private var gamePanelJob: Job? = null
@@ -209,13 +214,15 @@ class CalibrationOverlayService : Service() {
         val size = displaySnapshot(this).size
         val player = GamePlayerPanel(style, model, { attachedLayout }, { resizeGamePanel() },
             ::attachPlayerDrag, onClose = {
+                closeAfterPlayback = true
                 if (!PlaybackPreparation.stopPlayback()) stopSelf()
-            }, onArm = ::armPlayback, displayHeight = size.height, renderBlocked = { activePanelDrag != null })
+            }, onArm = ::armPlayback, scope = scope, musicPrefs = musicPrefs,
+            onKeyboard = ::setMusicKeyboard, displayHeight = size.height, renderBlocked = { activePanelDrag != null })
         gamePanel = player
         panel = player.view
         gameDisplay = size
         gameAnchor = readPlayerAnchor(size, player)
-        gameCollapsed = true
+        gameSizingMode = player.sizingMode
         gameTargetWidth = player.collapsedWidth
         gameTargetHeight = player.collapsedHeight
         val origin = playerOrigin(size, player, player.collapsedWidth, player.collapsedHeight)
@@ -336,8 +343,8 @@ class CalibrationOverlayService : Service() {
                 View.MeasureSpec.makeMeasureSpec(size.height, View.MeasureSpec.AT_MOST))
             game.view.measuredHeight.coerceIn(1, size.height)
         }
-        val changeMode = gameCollapsed != game.minimized
-        gameCollapsed = game.minimized
+        val changeMode = gameSizingMode != game.sizingMode
+        gameSizingMode = game.sizingMode
         if (!changeMode && gameMotion?.isRunning == true && gameTargetWidth == width && gameTargetHeight == height) return
         gameTargetWidth = width
         gameTargetHeight = height
@@ -414,7 +421,27 @@ class CalibrationOverlayService : Service() {
         })
     }
 
+    private fun setMusicKeyboard(focusable: Boolean) {
+        val view = panel ?: return
+        val params = panelParams ?: return
+        if (!panelAttached || gamePanel == null || (focusable && playbackRunner != null)) return
+        val mask = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        params.flags = if (focusable) (params.flags and mask.inv()) or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+            else params.flags or mask
+        params.softInputMode = if (focusable) WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+            else WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+        wm.updateViewLayout(view, params)
+    }
+
+    private fun removeSessionMusic() {
+        val window = sessionMusicView ?: return
+        sessionMusicView = null
+        gamePanel?.music()?.hide()
+        runCatching { wm.removeViewImmediate(window) }
+    }
+
     private fun armPlayback() {
+        gamePanel?.prepareForPlayback()
         if (armJob?.isActive == true || testJob?.isActive == true) { PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state="已有播放请求正在执行，请等待或停止"); return }
         val prepared=PlaybackPreparation.pending
         if (prepared == null && PlaybackPreparation.progress.value.stopped) return
@@ -433,7 +460,7 @@ class CalibrationOverlayService : Service() {
                 val preferRoot = root.preferred
                 val input = selectPlaybackInput(preferRoot, { accessibility.status().available }) {
                     PlaybackPreparation.progress.value = PlaybackPreparation.progress.value.copy(state = "正在检查 Root 授权")
-                    root.status().available || root.checkAccess().available
+                    root.checkAccessForUse().available
                 }
                 if (input == null || root.releaseUncertain) {
                     val reason = if (preferRoot || root.releaseUncertain) root.status().message else accessibility.status().message
@@ -463,6 +490,7 @@ class CalibrationOverlayService : Service() {
                     focusJob?.cancel()
                     focusJob = null
                     focusPackage = null
+                    if (closeAfterPlayback) stopSelf()
                 }
             }
         }
@@ -976,7 +1004,7 @@ class CalibrationOverlayService : Service() {
             var result: TapResult? = null
             var touch: RootGestureConnection? = null
             try {
-                if (root.preferred && root.status().available) touch = gameUid()?.let { root.openTouch(it) }
+                if (root.preferred && root.checkAccessForUse().available) touch = gameUid()?.let { root.openTouch(it) }
                 if (touch == null && !backend.status().available) {
                     result = TapResult.Unavailable("Root 输入不可用，无障碍回退未连接")
                     return@launch
@@ -1063,7 +1091,7 @@ class CalibrationOverlayService : Service() {
         }
         testJob?.start()
     }
-    private fun startPlayback(input: PlaybackInput) {
+    private suspend fun startPlayback(input: PlaybackInput) {
         fun reject(message: String) { Log.w("DeltaPlayback", "preflight rejected: $message"); PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state=message,phase=PlaybackStatus.FAILED) }
         if (saving || dirty || testJob?.isActive == true) { reject("请保存布局并等待当前操作结束"); return }
         val prepared = PlaybackPreparation.pending ?: run { reject("请重新选择曲目并开始"); return }
@@ -1082,7 +1110,20 @@ class CalibrationOverlayService : Service() {
         if (!before.supported || displaySnapshot(this) != before || !OverlayGeometry.compatible(draft, before.size)) {
             reject("屏幕方向或尺寸不匹配，请重新校准"); return
         }
-        val fresh = runCatching { PlaybackPlanner.plan(prepared.script,draft,runtimeState.pitchRegion,runtimeState.semitoneEnabled,prepared.start,prepared.count,prepared.speed,combined=prepared.plan.combined,minimumTouchMs=prepared.plan.minimumTouchMs,combinedLeadMs=prepared.plan.combinedLeadMs) }.getOrNull()
+        val planningState = runtimeState
+        val fresh = withContext(Dispatchers.Default) {
+            runCatching {
+                PlaybackPlanner.plan(prepared.script, draft, planningState.pitchRegion, planningState.semitoneEnabled,
+                    prepared.start, prepared.count, prepared.speed, combined = prepared.plan.combined,
+                    minimumTouchMs = prepared.plan.minimumTouchMs, combinedLeadMs = prepared.plan.combinedLeadMs,
+                    checkActive = { ensureActive() })
+            }.getOrNull()
+        }
+        if (PlaybackPreparation.pending !== prepared || !hasFreshGameFocus() ||
+            displaySnapshot(this) != before || runtimeState != planningState) {
+            reject("屏幕或游戏状态已变化，请重新预检")
+            return
+        }
         if (fresh == null || fresh.fatalErrors.isNotEmpty() || (fresh.warnings.isNotEmpty() && !prepared.warningsConfirmed) || fresh.warnings.any { it !in prepared.plan.warnings }) {
             reject("预检未通过，请检查目标、布局和警告"); return
         }
@@ -1104,12 +1145,24 @@ class CalibrationOverlayService : Service() {
             var expandedOrigin: ScreenPoint? = null
             var accessibilityGestureActive = false
             var resumingControls = false
+            var queuedTrack: String? = null
+            var touch: RootGestureConnection? = null
             val screenTargets = OverlayGeometry.protectedTouchPoints(draft.targets.map { Coordinates.toScreen(it.position, before.size) })
+
+            fun canInteractWithSessionMusic(): Boolean {
+                if (resumingControls || accessibilityGestureActive) return false
+                return when (PlaybackPreparation.progress.value.phase) {
+                    PlaybackStatus.PAUSED -> true
+                    PlaybackStatus.PLAYING -> touch != null && root.status().available
+                    else -> false
+                }
+            }
 
             fun updateSessionBar() {
                 sessionBar?.update(PlaybackPreparation.progress.value,
-                    canExpand = expandedOrigin != null && !resumingControls,
-                    canPause = !accessibilityGestureActive && !resumingControls)
+                    canExpand = expandedOrigin != null && !resumingControls && sessionMusicView == null,
+                    canPause = !accessibilityGestureActive && !resumingControls,
+                    canUseMusic = canInteractWithSessionMusic())
             }
 
             fun resizeSessionBar(expand: Boolean) {
@@ -1122,6 +1175,78 @@ class CalibrationOverlayService : Service() {
                 lp.y = origin.y.toInt()
                 bar.setExpanded(expand)
                 wm.updateViewLayout(bar.view, lp)
+                updateSessionBar()
+            }
+
+            fun toggleMusic() {
+                if (sessionMusicView != null) {
+                    removeSessionMusic()
+                    updateSessionBar()
+                    return
+                }
+                val bar = sessionParams ?: return
+                val player = gamePanel ?: return
+                if (!canInteractWithSessionMusic()) return
+                if (sessionBar?.expanded == true) resizeSessionBar(false)
+                val style = overlayStyle()
+                val width = minOf(style.dp(396), before.size.width - style.dp(16))
+                val height = minOf(style.dp(292), before.size.height - style.dp(16))
+                val reserved = OverlayRect(bar.x, bar.y, bar.width, bar.height)
+                val origin = musicWindowOrigin(before.size, width, height, screenTargets, reserved)
+                if (origin == null) {
+                    Toast.makeText(this@CalibrationOverlayService, overlayText(R.string.game_music_no_space), Toast.LENGTH_SHORT).show()
+                    return
+                }
+                val center = player.music()
+                (center.view.parent as? ViewGroup)?.removeView(center.view)
+                val window = LinearLayout(style.context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = style.panelBackground()
+                    setPadding(style.dp(9), style.dp(5), style.dp(9), style.dp(7))
+                }
+                val actions = LinearLayout(style.context)
+                val volume = style.text(player.volumeLabel(), 12f)
+                fun action(text: String, desc: Int, enabled: Boolean = true, invoke: () -> Unit) {
+                    actions.addView(style.button(text, size = 14f, action = invoke).apply {
+                        contentDescription = overlayText(desc)
+                        isEnabled = enabled
+                    }, LinearLayout.LayoutParams(0, style.touchSize, 1f))
+                }
+                fun queueTrack(step: Int) {
+                    if (app.model.libraryBusy.value) return
+                    queuedTrack = player.adjacentSong(step) ?: return
+                    PlaybackPreparation.stopPlayback()
+                    removeSessionMusic()
+                    updateSessionBar()
+                }
+                action("‹", R.string.game_music_previous, player.adjacentSong(-1) != null) { queueTrack(-1) }
+                action("›", R.string.game_music_next, player.adjacentSong(1) != null) { queueTrack(1) }
+                action("−", R.string.game_music_volume_down) { player.changeVolume(-1); volume.text = player.volumeLabel() }
+                action("+", R.string.game_music_volume_up) { player.changeVolume(1); volume.text = player.volumeLabel() }
+                action("×", R.string.overlay_close) { removeSessionMusic(); updateSessionBar() }
+                window.addView(actions)
+                window.addView(volume)
+                window.addView(center.view, LinearLayout.LayoutParams(-1, 0, 1f))
+                center.show(duringPlayback = true)
+                val lp = params(width, height).apply { x = origin.x.toInt(); y = origin.y.toInt() }
+                try {
+                    wm.addView(window, lp)
+                    sessionMusicView = window
+                } catch (failure: RuntimeException) {
+                    center.hide()
+                    (center.view.parent as? ViewGroup)?.removeView(center.view)
+                    Log.w("DeltaPlayback", "could not open music center", failure)
+                    return
+                }
+                window.addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+                    val location = IntArray(2)
+                    view.getLocationOnScreen(location)
+                    val actual = OverlayRect(location[0], location[1], view.width, view.height)
+                    if (view === sessionMusicView && (actual.overlaps(reserved) || screenTargets.any(actual::contains))) {
+                        removeSessionMusic()
+                        updateSessionBar()
+                    }
+                }
                 updateSessionBar()
             }
 
@@ -1139,9 +1264,8 @@ class CalibrationOverlayService : Service() {
             }
             var currentSourceIndex: Int? = null
             var overlayRestored=false
-            var touch: RootGestureConnection? = null
             fun environmentValid() = !destroyed && displaySnapshot(this@CalibrationOverlayService) == before &&
-                (touch != null || backend.status().available) && Settings.canDrawOverlays(this@CalibrationOverlayService) && hasFreshGameFocus()
+                (if (touch != null) root.status().available else backend.status().available) && Settings.canDrawOverlays(this@CalibrationOverlayService) && hasFreshGameFocus()
             suspend fun playRoot(connection: RootGestureConnection, gesture: CombinedGesture, index: Int?, duration: Long): TapResult {
                 if (gesture.strokes.any { !root.validPoint(it.point) }) return TapResult.InvalidPoint("坐标不在默认屏幕内")
                 return connection.play(gesture, stop = { runner.stopRequested || !environmentValid() }) { timing ->
@@ -1188,7 +1312,7 @@ class CalibrationOverlayService : Service() {
                         cancelGameMotion()
                         activePanelDrag = null
                         if (panelAttached) { wm.removeViewImmediate(panelView); panelAttached = false }
-                        val bar = GameSessionBar(overlayStyle(), app.model.midiWorkspace.name,
+                        fun controls(withMusic: Boolean) = GameSessionBar(overlayStyle(), app.model.midiWorkspace.name,
                             onTogglePause = {
                                 if (!accessibilityGestureActive && !resumingControls && PlaybackPreparation.togglePause()) {
                                     updateSessionBar()
@@ -1201,9 +1325,14 @@ class CalibrationOverlayService : Service() {
                                     PlaybackPreparation.progress.value.phase == PlaybackStatus.PAUSED) {
                                     resizeSessionBar(!current.expanded)
                                 }
-                            })
-                        val origin = OverlayGeometry.controlBarOrigin(before.size, bar.compactWidth, bar.compactHeight, screenTargets)
-                            ?: error("演奏控制窗口覆盖目标，请调整校准位置")
+                            }, onToggleMusic = if (withMusic) ::toggleMusic else null)
+                        var bar = controls(withMusic = gamePanel != null)
+                        var candidate = OverlayGeometry.controlBarOrigin(before.size, bar.compactWidth, bar.compactHeight, screenTargets)
+                        if (candidate == null) {
+                            bar = controls(withMusic = false)
+                            candidate = OverlayGeometry.controlBarOrigin(before.size, bar.compactWidth, bar.compactHeight, screenTargets)
+                        }
+                        val origin = candidate ?: error("演奏控制窗口覆盖目标，请调整校准位置")
                         compactOrigin = origin
                         expandedOrigin = OverlayGeometry.controlBarOrigin(before.size, bar.expandedWidth, bar.expandedHeight, screenTargets)
                         val lp = params(bar.compactWidth, bar.compactHeight).apply { x = origin.x.toInt(); y = origin.y.toInt() }
@@ -1237,13 +1366,14 @@ class CalibrationOverlayService : Service() {
                     },
                     restore = {
                         if (!overlayRestored) {
+                            removeSessionMusic()
                             var restoreFailure: Exception?=null
                             stopView?.let { view ->
                                 try { wm.removeViewImmediate(view); stopView=null } catch(e: Exception) { restoreFailure=e }
                             }
                             sessionBar = null
                             sessionParams = null
-                            if (!destroyed) try {
+                            if (!destroyed && !closeAfterPlayback) try {
                                 if (!panelAttached) { wm.addView(panelView,panelParams); panelAttached = true }
                                 shown = originalShown
                                 val restoredDisplay = displaySnapshot(this@CalibrationOverlayService)
@@ -1329,6 +1459,7 @@ class CalibrationOverlayService : Service() {
                         result
                     }, onResuming = {
                         resumingControls = true
+                        removeSessionMusic()
                         if (sessionBar?.expanded == true) resizeSessionBar(false) else updateSessionBar()
                         verifySessionWindow()
                     })
@@ -1336,6 +1467,7 @@ class CalibrationOverlayService : Service() {
             catch (e: Exception) { runtimeState = runtimeState.reset(); if (!destroyed) Toast.makeText(this@CalibrationOverlayService,"播放或恢复失败：${e.localizedMessage}",Toast.LENGTH_LONG).show() }
             finally {
                 clockJob?.cancel()
+                removeSessionMusic()
                 val cleanup = touch?.let { root.closeTouch(it) }
                 if (cleanup == RootCleanup.OBSERVED_IDLE) {
                     outcome = outcome?.copy(failure = "游戏触摸中断，Android 输入队列已清理")
@@ -1358,6 +1490,10 @@ class CalibrationOverlayService : Service() {
                         if (!destroyed && panelAttached) R.string.overlay_completed_restored else R.string.overlay_completed_check,
                     )
                 })
+                if (closeAfterPlayback) stopSelf()
+                else if (!destroyed && outcome?.stopped == true && outcome?.failure == null) {
+                    queuedTrack?.let { gamePanel?.selectTrack(it, play = true) }
+                }
             }
         }
         testJob?.start()
@@ -1398,6 +1534,8 @@ class CalibrationOverlayService : Service() {
             Log.w("DeltaPlayback", "overlay service destroyed during session")
             PlaybackPreparation.progress.value=PlaybackPreparation.progress.value.copy(state="校准服务已停止，请重新启动后检查游戏状态",phase=PlaybackStatus.FAILED)
         }
+        gamePanel?.releaseMusicKeyboard()
+        removeSessionMusic()
         cancelGameMotion()
         destroyed = true; PlaybackPreparation.cancelPendingStart=null; playbackRunner?.requestStop(); focusJob?.cancel(); focusJob=null; focusPackage=null; stopView?.let { runCatching { wm.removeViewImmediate(it) } }; stopView=null; displayManager.unregisterDisplayListener(listener); scope.cancel(); runCatching { removeMarkers() }
         panel?.let { if (panelAttached) runCatching { wm.removeViewImmediate(it) } }; panelAttached = false; panel = null
@@ -1405,4 +1543,3 @@ class CalibrationOverlayService : Service() {
         super.onDestroy()
     }
 }
-

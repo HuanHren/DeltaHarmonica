@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="score_fully_compatible">曲谱兼容</string>
+    <string name="score_adapted">适配后兼容</string>
+    <string name="score_partially_compatible">部分兼容</string>
+    <string name="score_incompatible">曲谱不兼容</string>
+    <string name="score_compatibility_checking">正在检查音符映射…</string>
+    <string name="score_unmapped">有 %1$d 个音符无法映射，当前配置无法开始演奏。</string>
+    <string name="score_musicxml_unsupported">当前版本尚未支持 MusicXML。</string>
+    <string name="score_dfhs_converting">正在转换 DFHS1…</string>
+    <string name="library_source_dfhs">本地 DFHS1</string>
+</resources>

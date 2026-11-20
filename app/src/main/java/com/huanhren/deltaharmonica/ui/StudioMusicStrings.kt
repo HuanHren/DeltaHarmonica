@@ -107,6 +107,8 @@ internal fun musicDiagnostic(message: String): String {
         "无法验证旧脚本是否存在未映射音符" -> R.string.player_error_legacy_mapping
         "不支持的脚本版本" -> R.string.player_error_script_version
         "脚本数据无效" -> R.string.player_error_script_data
+        "当前版本尚未支持 MusicXML" -> R.string.score_musicxml_unsupported
+        "正在转换 DFHS1…" -> R.string.score_dfhs_converting
         "文件为空，无法读取 MIDI。" -> R.string.import_error_empty
         "文件超过 2 MB，无法安全导入。" -> R.string.import_error_file_size
         "这是 ZIP 压缩包，请先解压并选择其中的 MIDI 文件。" -> R.string.import_error_zip
