@@ -137,6 +137,7 @@ object RootTouchMain {
                                     onNote = { index, note ->
                                         reply("EVENT $index ${note.status} ${note.noteDown ?: -1} ${note.noteUp ?: -1}")
                                     },
+                                    onStarted = { reply("START $it") },
                                 ) }.getOrElse { RootSequenceOutcome("UNCONFIRMED", 0) }
                                 safe.set(result.status != "UNCONFIRMED")
                                 busy.set(false)
