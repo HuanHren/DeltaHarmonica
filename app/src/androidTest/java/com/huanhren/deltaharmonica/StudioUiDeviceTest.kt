@@ -39,7 +39,9 @@ import com.huanhren.deltaharmonica.model.InstrumentRuntimeState
 import com.huanhren.deltaharmonica.model.Region
 import com.huanhren.deltaharmonica.model.ScreenSize
 import com.huanhren.deltaharmonica.overlay.GameCalibrationPanel
+import androidx.lifecycle.lifecycleScope
 import com.huanhren.deltaharmonica.overlay.GamePlayerPanel
+import com.huanhren.deltaharmonica.overlay.MusicCenterPreferences
 import com.huanhren.deltaharmonica.overlay.GameSessionBar
 import com.huanhren.deltaharmonica.playback.PlaybackProgress
 import com.huanhren.deltaharmonica.playback.PlaybackStatus
@@ -551,7 +553,8 @@ class StudioUiDeviceTest {
             val container = FrameLayout(this).apply { setBackgroundColor(0xFF10161E.toInt()) }
             frame = container
             val fullscreen = resources.displayMetrics
-            panel = GamePlayerPanel(style, fixture, { null }, {}, { _, _ -> }, {}, {}, fullscreen.heightPixels)
+            panel = GamePlayerPanel(style, fixture, { null }, {}, { _, _ -> }, {}, {},
+                lifecycleScope, MusicCenterPreferences(this), {}, fullscreen.heightPixels)
             container.addView(panel.view, FrameLayout.LayoutParams(panel.collapsedWidth, panel.collapsedHeight,
                 Gravity.CENTER_VERTICAL or Gravity.END).apply { marginEnd = style.dp(20) })
             setContentView(container)
@@ -567,7 +570,7 @@ class StudioUiDeviceTest {
             }
             val labels = panel.view.descendants().filterIsInstance<TextView>().map { it.text.toString() }.toSet()
             assertTrue(labels.containsAll(listOf(
-                "潮汐练习曲", getString(R.string.overlay_choose), getString(R.string.overlay_8_notes),
+                "潮汐练习曲", getString(R.string.game_music_center), getString(R.string.overlay_8_notes),
                 getString(R.string.overlay_16_notes), getString(R.string.overlay_full), getString(R.string.overlay_speed, 1),
                 getString(R.string.overlay_speed, 2), getString(R.string.overlay_start), getString(R.string.overlay_stop),
             )))

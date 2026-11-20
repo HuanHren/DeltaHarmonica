@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="score_fully_compatible">Compatible score</string>
+    <string name="score_adapted">Compatible with adaptation</string>
+    <string name="score_partially_compatible">Partially compatible</string>
+    <string name="score_incompatible">Incompatible score</string>
+    <string name="score_compatibility_checking">Checking note mapping…</string>
+    <string name="score_unmapped">Playback is unavailable with this layout because %1$d notes have no mapping.</string>
+    <string name="score_musicxml_unsupported">This version does not support MusicXML yet.</string>
+    <string name="score_dfhs_converting">Converting DFHS1…</string>
+    <string name="library_source_dfhs">Local DFHS1</string>
+</resources>

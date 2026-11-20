@@ -1,8 +1,11 @@
 package com.huanhren.deltaharmonica.data
 
-import com.huanhren.deltaharmonica.midi.MidiParser
+import com.huanhren.deltaharmonica.midi.MidiScoreSource
 import com.huanhren.deltaharmonica.midi.PerformanceScript
+import com.huanhren.deltaharmonica.midi.ScoreConversionCache
 import com.huanhren.deltaharmonica.midi.ScriptCodec
+import com.huanhren.deltaharmonica.midi.SongCompatibilityAnalyzer
+import com.huanhren.deltaharmonica.online.DfhsDecoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
@@ -21,7 +24,9 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.UUID
 
-@Serializable enum class SongSourceType { MIDI, JSON, ONLINE_DFHS }
+@Serializable enum class SongSourceType { MIDI, JSON, ONLINE_DFHS, LOCAL_DFHS }
+
+internal data class StagedMidiSource(val token: String, val source: MidiScoreSource, val contentHash: String)
 
 @Serializable
 data class OnlineSongOrigin(
@@ -189,16 +194,40 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
         require(token.startsWith(".candidate-") && runCatching { UUID.fromString(token.removePrefix(".candidate-")).toString() == token.removePrefix(".candidate-") }.getOrDefault(false)) { "无效的导入文件" }
         return File(root, token)
     }
-    suspend fun stageMidi(bytes: ByteArray): String = withContext(Dispatchers.IO) { synchronized(lock) {
-        require(bytes.size in 1..MAX_BYTES) { "文件大小无效" }; MidiParser.parse(bytes); root.mkdirs()
-        val token = ".candidate-${UUID.randomUUID()}"; val file = candidate(token)
-        try { file.writeBytes(bytes); token } catch (e: Exception) { file.delete(); throw e }
-    } }
+    suspend fun stageMidi(bytes: ByteArray): String = stageMidiSource(bytes).token
+
+    internal suspend fun stageMidiSource(bytes: ByteArray): StagedMidiSource {
+        require(bytes.size in 1..MAX_BYTES) { "文件大小无效" }
+        val (source, digest) = withContext(Dispatchers.Default) {
+            SongCompatibilityAnalyzer.readMidi(bytes) { ensureActive() } to ScoreConversionCache.sha256(bytes)
+        }
+        val token = ".candidate-${UUID.randomUUID()}"
+        try {
+            return withContext(Dispatchers.IO) {
+                synchronized(lock) {
+                    root.mkdirs()
+                    candidate(token).writeBytes(bytes)
+                    StagedMidiSource(token, source, digest)
+                }
+            }
+        } catch (failure: Exception) {
+            try {
+                withContext(NonCancellable) { discardCandidate(token) }
+            } catch (cleanup: Exception) {
+                failure.addSuppressed(cleanup)
+            }
+            throw failure
+        }
+    }
     suspend fun discardCandidate(token: String) = withContext(Dispatchers.IO) { synchronized(lock) { candidate(token).delete() } }
-    suspend fun addStagedMidi(name: String, token: String, script: PerformanceScript, warnings: List<String>): SongLibraryItem {
+    suspend fun addStagedMidi(name: String, token: String, script: PerformanceScript, warnings: List<String>): SongLibraryItem =
+        addStagedMidi(name, token, script, warnings, null)
+
+    internal suspend fun addStagedMidi(name: String, token: String, script: PerformanceScript, warnings: List<String>,
+                                      validatedSourceHash: String?): SongLibraryItem {
         try {
             val bytes = withContext(Dispatchers.IO) { synchronized(lock) { candidate(token).readBytes() } }
-            return add(name, SongSourceType.MIDI, bytes, script, warnings)
+            return add(name, SongSourceType.MIDI, bytes, script, warnings, null, false, validatedSourceHash)
         } finally {
             withContext(NonCancellable) { discardCandidate(token) }
         }
@@ -240,19 +269,23 @@ class SongLibraryRepository(private val root: File, private val operations: Impo
 
     private suspend fun add(
         name: String, source: SongSourceType, original: ByteArray, script: PerformanceScript, warnings: List<String>,
-        online: OnlineSongOrigin?, allowNewRevision: Boolean,
+        online: OnlineSongOrigin?, allowNewRevision: Boolean, validatedSourceHash: String? = null,
     ): SongLibraryItem = withContext(Dispatchers.IO) { val context = currentCoroutineContext(); synchronized(lock) {
         require(name.isNotBlank() && original.size in 1..MAX_BYTES) { "文件名或大小无效" }
         require((source == SongSourceType.ONLINE_DFHS) == (online != null)) { "在线曲谱来源无效" }
         online?.let(::validateOnlineOrigin)
         require(script.events.isNotEmpty()) { "脚本没有可播放事件" }
+        val originalHash = hash(original)
         when (source) {
-            SongSourceType.MIDI -> MidiParser.parse(original)
+            SongSourceType.MIDI -> {
+                if (validatedSourceHash == null) SongCompatibilityAnalyzer.readMidi(original) { context.ensureActive() }
+                else require(originalHash == validatedSourceHash) { "待导入 MIDI 的摘要已变化" }
+            }
             SongSourceType.JSON -> require(ScriptCodec.decode(original.toString(Charsets.UTF_8)) == script) { "JSON 脚本与原文件不一致" }
+            SongSourceType.LOCAL_DFHS -> DfhsDecoder.decode(original) { context.ensureActive() }
             SongSourceType.ONLINE_DFHS -> Unit // The online import passes already decoded and validated bytes.
         }
         root.mkdirs()
-        val originalHash = hash(original)
         val existing = scan()
         if (online != null) {
             val sameId = findOnline(existing, online.remoteId)

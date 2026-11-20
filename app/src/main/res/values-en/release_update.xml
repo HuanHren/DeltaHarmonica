@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="update_title">Updates</string>
+    <string name="update_description">Check, download and install stable releases</string>
+    <string name="update_stable_channel">Channel: stable</string>
+    <string name="update_disabled_build">In-app updates are available in the official release build.</string>
+    <string name="update_automatic">Check for updates automatically</string>
+    <string name="update_automatic_summary">Check GitHub for a stable release once per cold start</string>
+    <string name="update_check">Check for updates</string>
+    <string name="update_last_checked">Last checked: %1$s</string>
+    <string name="update_never_checked">Never</string>
+    <string name="update_checking">Checking for a stable release</string>
+    <string name="update_current">You have the latest version</string>
+    <string name="update_no_release">No stable release has been published</string>
+    <string name="update_available">A stable update is available</string>
+    <string name="update_show">View update</string>
+    <string name="update_latest">Latest stable release %1$s</string>
+    <string name="update_release_details">Published %1$s · APK %2$s</string>
+    <string name="update_download">Download update</string>
+    <string name="update_downloading">Downloading · %1$d%%</string>
+    <string name="update_verified">The APK passed the integrity, signing certificate and version checks.</string>
+    <string name="update_install">Open system installer</string>
+    <string name="update_allow_return">After allowing this app to install updates, return here and open the system installer again.</string>
+    <string name="update_install_error">The system installer could not open. Retry or check the installation permission.</string>
+    <string name="update_network">The update request failed. Check your connection and retry.</string>
+    <string name="update_access">GitHub refused the update request. Try again later.</string>
+    <string name="update_rate_limit">The GitHub request limit has been reached. Try again later.</string>
+    <string name="update_unavailable">The update service or file is unavailable. Try again later.</string>
+    <string name="update_metadata">The stable release information or APK checksum is invalid.</string>
+    <string name="update_bad_size">The APK size differs from the published size.</string>
+    <string name="update_bad_digest">The APK failed SHA-256 verification.</string>
+    <string name="update_bad_apk">Android could not read the downloaded APK.</string>
+    <string name="update_bad_package">The APK package name differs from the installed app.</string>
+    <string name="update_bad_signature">The APK signing certificate differs from the installed app.</string>
+    <string name="update_bad_version">The APK version differs from the release or cannot upgrade the installed app.</string>
+    <string name="update_storage">Update settings or files could not be saved. Try again.</string>
+</resources>

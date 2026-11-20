@@ -43,6 +43,8 @@ internal class OverlayStyle(val context: Context, appearance: StudioAppearance) 
     }
     private val ink = (if (dark) tokens.DarkInk else tokens.LightInk).toArgb()
     private val muted = (if (dark) tokens.DarkMuted else tokens.LightMuted).toArgb()
+    val foreground get() = ink
+    val secondaryForeground get() = muted
     val accent = accentColor.toArgb()
     val track = lerp(canvas, accentColor, if (dark) .21f else .16f).toArgb()
     private val tint = lerp(surface, accentColor, if (dark) .26f else .16f).toArgb()

@@ -3,7 +3,12 @@ package com.huanhren.deltaharmonica.midi
 import com.huanhren.deltaharmonica.model.*
 import java.security.MessageDigest
 
-data class ConversionReport(val script: PerformanceScript, val warnings: List<String>, val stateChanges: Int)
+data class ConversionReport(
+    val script: PerformanceScript,
+    val warnings: List<String>,
+    val stateChanges: Int,
+    val compatibility: SongCompatibilityReport = SongCompatibilityAnalyzer.analyze(script),
+)
 
 internal data class ScriptTiming(
     val ppq: Int,
@@ -19,7 +24,21 @@ object ScriptConverter {
     }
     fun matchesProfile(script: PerformanceScript, profile: InstrumentProfile, layout: InstrumentLayout? = null) =
         script.instrumentProfileId == profile.id && script.profileFingerprint == fingerprint(profile, layout)
-    fun convert(midi: ParsedMidi, fileName: String, track: Int, policy: MonophonyPolicy, transpose: Int, profile: InstrumentProfile, layout: InstrumentLayout?): ConversionReport {
+    fun convert(midi: ParsedMidi, fileName: String, track: Int, policy: MonophonyPolicy, transpose: Int,
+                profile: InstrumentProfile, layout: InstrumentLayout?): ConversionReport =
+        convertMidi(midi, fileName, track, policy, transpose, profile, layout, SongCompatibilityAnalyzer.midiFormat(fileName))
+
+    internal fun convertMidi(
+        midi: ParsedMidi,
+        fileName: String,
+        track: Int,
+        policy: MonophonyPolicy,
+        transpose: Int,
+        profile: InstrumentProfile,
+        layout: InstrumentLayout?,
+        format: ScoreFormat,
+        checkActive: () -> Unit = {},
+    ): ConversionReport {
         require(track in midi.tracks.indices && transpose in -24..24)
         val clock = MidiTempoClock(midi.ppq, midi.tempos)
         val timing = ScriptTiming(
@@ -27,8 +46,12 @@ object ScriptConverter {
             midi.tempos.map { ScriptTempo(clock.millisecondsAt(it.tick), it.microsecondsPerQuarter) },
             midi.timeSignatures.map { ScriptTimeSignature(clock.millisecondsAt(it.tick), it.numerator, it.denominator) },
         )
-        return convertTrack(midi.tracks[track].notes, fileName, track, policy, transpose, profile, layout,
-            timing, midi.importStatus, midi.warnings)
+        val notes = midi.tracks[track].notes
+        val result = convertTrack(notes, fileName, track, policy, transpose, profile, layout,
+            timing, midi.importStatus, midi.warnings, checkActive)
+        return result.copy(compatibility = SongCompatibilityAnalyzer.includeSource(
+            result.compatibility, format, midi.format, notes, midi.tracks.size, midi.tracks.count { it.notes.isNotEmpty() },
+        ))
     }
 
     internal fun convertTrack(
@@ -44,18 +67,22 @@ object ScriptConverter {
         sourceWarnings: List<String> = emptyList(),
         checkActive: () -> Unit = {},
     ): ConversionReport {
-        val mono = Monophony.convert(notes, policy)
+        val mono = Monophony.convert(notes, policy, checkActive)
         checkActive()
         val events = mutableListOf<ScriptEvent>(); val warnings = sourceWarnings.toMutableList()
         if (mono.discardedMs > 0) warnings.add("单音化丢弃了 ${mono.discardedMs} 毫秒的重叠音符时长；保留片段不延长。")
         var region: Region? = null; var semitone: Boolean? = null; var changes = 0; var unmapped = 0
-        val availableKeys=layout?.targets?.filter { it.type == TargetType.NOTE }?.mapNotNull { it.attributes["keyIndex"]?.toIntOrNull() }?.toSet()
-        val choices=PitchMapper.optimize(profile,mono.notes.map { it.pitch+transpose },allowedKeys=availableKeys)
+        val targetsByKey = layout?.targets?.filter { it.type == TargetType.NOTE }
+            ?.mapNotNull { target -> target.attributes["keyIndex"]?.toIntOrNull()
+                ?.takeIf { it.toString() == target.attributes["keyIndex"] }?.let { it to target.id } }
+            ?.distinctBy { it.first }?.toMap()
+        val choices = PitchMapper.optimize(profile, mono.notes.map { it.pitch + transpose },
+            allowedKeys = targetsByKey?.keys, checkActive = checkActive)
         for ((index,note) in mono.notes.withIndex()) {
             if (index % 1024 == 0) checkActive()
             val pitch = note.pitch + transpose
             val choice = choices[index]
-            val target = choice?.let { c -> layout?.targets?.find { it.type == TargetType.NOTE && it.attributes["keyIndex"] == c.keyIndex.toString() }?.id ?: if (layout == null) "NOTE_${c.keyIndex+1}" else null }
+            val target = choice?.let { if (targetsByKey == null) "NOTE_${it.keyIndex + 1}" else targetsByKey[it.keyIndex] }
             if (choice == null || target == null) { unmapped++; warnings.add("${note.startMs} ms：音高 $pitch 无法精确映射到配置或布局，已省略"); continue }
             if (region != null && region != choice.region) changes++
             if (semitone != null && semitone != choice.semitone) changes++

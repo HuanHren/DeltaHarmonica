@@ -117,6 +117,49 @@ class ImportPipelineTest {
         }
     }
 
+    @Test fun importsZipAndDfhsWhilePreservingOriginalBytes() = runBlocking {
+        val zipBytes = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(zipBytes).use { archive ->
+            archive.putNextEntry(java.util.zip.ZipEntry("scores/piece.mid"))
+            archive.write(midi)
+            archive.closeEntry()
+        }
+        val dfhsBytes = java.io.ByteArrayOutputStream()
+        val deflater = java.util.zip.Deflater(java.util.zip.Deflater.DEFAULT_COMPRESSION, true)
+        try {
+            java.util.zip.DeflaterOutputStream(dfhsBytes, deflater).use { stream ->
+                stream.write("4446485301e003000100e05d01000404000100e0033c".chunked(2).map { it.toInt(16).toByte() }.toByteArray())
+            }
+        } finally {
+            deflater.end()
+        }
+        val repository = SongLibraryRepository(temporary.newFolder())
+        val workspace = MidiWorkspace()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val coordinator = ImportCoordinator(scope)
+        val pipeline = ImportPipeline(repository, workspace, coordinator, selectedLayout = { layout })
+        try {
+            val zip = zipBytes.toByteArray()
+            assertTrue(pipeline.importDocument { "piece.zip" to zip })
+            assertEquals(ImportPhase.READY, finish(coordinator).phase)
+            assertTrue(pipeline.convertMidi(layout))
+            val importedMidi = finish(coordinator)
+            assertEquals(importedMidi.message, ImportPhase.COMMITTED, importedMidi.phase)
+            assertArrayEquals(zip, repository.readOriginal(requireNotNull(importedMidi.songId)))
+            assertEquals(ScoreFormat.ZIP_MIDI, workspace.report?.compatibility?.format)
+
+            val dfhs = dfhsBytes.toByteArray()
+            assertTrue(pipeline.importDocument { "piece.dfhs" to dfhs })
+            val importedDfhs = finish(coordinator)
+            assertEquals(importedDfhs.message, ImportPhase.COMMITTED, importedDfhs.phase)
+            assertArrayEquals(dfhs, repository.readOriginal(requireNotNull(importedDfhs.songId)))
+            assertEquals(ScoreFormat.DFHS1, workspace.report?.compatibility?.format)
+        } finally {
+            scope.cancel()
+            PlaybackPreparation.progress.value = PlaybackProgress()
+        }
+    }
+
     @Test fun rejectedRequestAndCancelledOldTaskCannotOverwriteImmediateRetry() = runBlocking {
         val root=temporary.newFolder(); val repo=SongLibraryRepository(root); val workspace=MidiWorkspace()
         val scope=CoroutineScope(SupervisorJob()+Dispatchers.Default); val coordinator=ImportCoordinator(scope); val pipeline=ImportPipeline(repo,workspace,coordinator)

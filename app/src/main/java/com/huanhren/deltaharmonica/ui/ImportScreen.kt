@@ -150,7 +150,7 @@ private fun importDetail(state: ImportUiState): String {
         ImportPhase.READING -> R.string.import_detail_reading
         ImportPhase.PREFLIGHT -> R.string.import_detail_checking
         ImportPhase.PARSING -> if (state.message.contains("JSON")) R.string.import_detail_parsing_json else R.string.import_detail_parsing_midi
-        ImportPhase.CONVERTING -> R.string.import_detail_converting
+        ImportPhase.CONVERTING -> if (state.message.contains("DFHS1")) R.string.score_dfhs_converting else R.string.import_detail_converting
         ImportPhase.SAVING -> R.string.import_detail_saving
         ImportPhase.COMMITTED -> when {
             state.active -> R.string.import_detail_loading

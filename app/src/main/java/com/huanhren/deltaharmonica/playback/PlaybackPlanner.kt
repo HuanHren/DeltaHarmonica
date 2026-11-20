@@ -14,16 +14,15 @@ object PlaybackPlanner {
     fun mappedEventCount(script: PerformanceScript, layout: InstrumentLayout): Int {
         val profile=layout.profile ?: return 0
         if (!ScriptConverter.matchesProfile(script,profile,layout)) return 0
-        val targets=layout.targets.associateBy { it.id }
-        return script.events.count { e ->
-            val target=targets[e.noteKeyId]
-            val key=target?.attributes?.get("keyIndex")?.toIntOrNull()
-            target?.type == TargetType.NOTE && key != null && profile.pitches[e.pitchRegion]?.getOrNull(key)?.let { it + if (e.semitoneEnabled) 1 else 0 } == e.midiNote
-        }
+        val keys = PlaybackMapping.noteKeys(layout)
+        return script.events.count { PlaybackMapping.isMapped(it, profile, keys) }
     }
     /** Conservative placeholders, not measured device latency. Explicitly stretch, never silently skip notes. */
     fun plan(script: PerformanceScript, layout: InstrumentLayout, initialRegion: Region?, initialSemitone: Boolean?,
-             start: Int, count: Int, speed: Double, controlMs: Long = 150, settleMs: Long = 100, combined: Boolean = false, minimumTouchMs: Long = 1, combinedLeadMs: Long = 40, gestureOverheadMs: Long = 30): PlaybackPlan {
+             start: Int, count: Int, speed: Double, controlMs: Long = 150, settleMs: Long = 100, combined: Boolean = false,
+             minimumTouchMs: Long = 1, combinedLeadMs: Long = 40, gestureOverheadMs: Long = 30,
+             checkActive: () -> Unit = {}): PlaybackPlan {
+        checkActive()
         require(count in 1..100_000 && start >= 0 && start.toLong() + count <= script.events.size && speed in setOf(.5,.75,1.0,2.0))
         require(controlMs in 1..2000 && settleMs in 0..2000)
         require(minimumTouchMs in 1..500)
@@ -44,7 +43,8 @@ object PlaybackPlanner {
         }
         if (!script.mappingVerified) warnings.add("音高映射未经实机验证")
         if (combined) warnings.add("组合触摸的游戏生效顺序尚需实机验证；请先试听并核对音高")
-        if (runCatching { ScriptCodec.encode(script) }.isFailure) errors.add("脚本数据无效")
+        if (runCatching { ScriptCodec.validate(script) }.isFailure) errors.add("脚本数据无效")
+        checkActive()
         // Reject extreme values before subtraction, scaling, or accumulating durations can overflow.
         // The bound reserves ample headroom for all 100,000 control and gesture durations.
         val timeLimit = Long.MAX_VALUE / 4
@@ -54,27 +54,27 @@ object PlaybackPlanner {
         if (unsafeTime || "脚本数据无效" in errors)
             return PlaybackPlan(emptyList(),0,0,0,warnings.distinct(),errors.distinct(),controlMs,settleMs,combined,minimumTouchMs,0,combinedLeadMs,gestureOverheadMs)
         val targetById = layout.targets.associateBy { it.id }
-        val firstInvalid = script.events.indexOfFirst { e ->
-            val target = targetById[e.noteKeyId]
-            val key = target?.attributes?.get("keyIndex")?.toIntOrNull()
-            target?.type != TargetType.NOTE || key == null || profile?.pitches?.get(e.pitchRegion)?.getOrNull(key)?.let { it + if (e.semitoneEnabled) 1 else 0 } != e.midiNote
-        }
+        val noteKeys = PlaybackMapping.noteKeys(layout)
+        val firstInvalid = script.events.indexOfFirst { !PlaybackMapping.isMapped(it, profile, noteKeys) }
         if (firstInvalid >= 0) errors.add("脚本第 ${firstInvalid+1} 个事件的目标或音高映射无效")
         val base = script.events[start].startTimeMs
         var currentRegion = initialRegion; var currentSemi = initialSemitone; var cursor=0L; var nr=0; var ns=0
         val original=script.events.subList(start,start+count)
-        val keys=layout.targets.filter { it.type == TargetType.NOTE }.mapNotNull { target -> target.attributes["keyIndex"]?.toIntOrNull()?.let { it to target.id } }
-            .sortedBy { it.second }.distinctBy { it.first }.toMap()
-        val choices=profile?.let { PitchMapper.optimize(it,original.map { event -> event.midiNote },initialRegion,initialSemitone,keys.keys) }
-        val selected=original.mapIndexed { index,event ->
-            val choice=choices?.get(index)
-            if(choice == null) event else event.copy(noteKeyId=keys.getValue(choice.keyIndex),pitchRegion=choice.region,semitoneEnabled=choice.semitone)
+        val keys = noteKeys.toSortedMap().entries.distinctBy { it.value }.associate { (id, key) -> key to id }
+        val choices = profile?.let {
+            PitchMapper.optimize(it, original.map { event -> event.midiNote }, initialRegion, initialSemitone,
+                keys.keys, checkActive)
         }
         var delayedCount=0; var maxDelay=0L; var extendedNotes=0; var unverifiedShort=0
-        val plans=selected.mapIndexed { index,e ->
+        val plans = original.mapIndexed { index, event ->
+            if (index % 1024 == 0) checkActive()
+            val choice = choices?.get(index)
+            val keyId = choice?.let { keys.getValue(it.keyIndex) }
+            val e = if (choice == null || (event.noteKeyId == keyId && event.pitchRegion == choice.region &&
+                    event.semitoneEnabled == choice.semitone)) event
+                else event.copy(noteKeyId = requireNotNull(keyId), pitchRegion = choice.region, semitoneEnabled = choice.semitone)
             val target = targetById[e.noteKeyId]
-            val key = target?.attributes?.get("keyIndex")?.toIntOrNull()
-            if (target?.type != TargetType.NOTE || key == null || profile?.pitches?.get(e.pitchRegion)?.getOrNull(key)?.let { it + if (e.semitoneEnabled) 1 else 0 } != e.midiNote)
+            if (!PlaybackMapping.isMapped(e, profile, noteKeys))
                 errors.add("事件 ${start+index+1} 的目标或音高映射无效")
             val changeRegion=currentRegion != e.pitchRegion; val changeSemi=currentSemi != e.semitoneEnabled
             if (changeRegion) { nr++; if (targetById["REGION_${e.pitchRegion.name}"]?.type != TargetType.REGION) errors.add("音区目标缺失：${e.pitchRegion}") }

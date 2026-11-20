@@ -39,6 +39,7 @@ internal enum class SettingsPage(
     CALIBRATION("calibration", R.string.settings_calibration, R.string.settings_calibration_description, ProductIcon.Calibration),
     LIBRARY("library", R.string.settings_library, R.string.settings_library_description, ProductIcon.Library),
     SYSTEM("system", R.string.settings_system, R.string.settings_system_description, ProductIcon.Shield),
+    UPDATES("updates", R.string.update_title, R.string.update_description, ProductIcon.Info),
     ABOUT("about", R.string.settings_about, R.string.settings_about_description, ProductIcon.Info),
     APPEARANCE("appearance", R.string.appearance, R.string.settings_appearance_description, ProductIcon.Settings);
 
@@ -70,6 +71,7 @@ internal fun SettingsScreen(
                     SettingsPage.CALIBRATION -> settingsCalibrationStatus(state)
                     SettingsPage.LIBRARY -> settingsLibraryStatus(model)
                     SettingsPage.SYSTEM -> accessibilityStatus(state)
+                    SettingsPage.UPDATES -> stringResource(R.string.update_stable_channel)
                     SettingsPage.ABOUT -> versionSummary()
                     SettingsPage.APPEARANCE -> stringResource(LocalAppearance.current.theme.labelRes())
                 }

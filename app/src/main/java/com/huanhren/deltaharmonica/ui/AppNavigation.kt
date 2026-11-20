@@ -41,6 +41,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.huanhren.deltaharmonica.R
+import com.huanhren.deltaharmonica.update.releaseUpdates
 import com.huanhren.deltaharmonica.overlay.CalibrationOverlayService
 import com.huanhren.deltaharmonica.ui.theme.*
 import top.yukonga.miuix.kmp.blur.layerBackdrop
@@ -88,6 +89,11 @@ fun AppNavigation(model: AppViewModel, activity: Activity) {
     }
     val primary = StudioTab.entries.firstOrNull { it.route == route }
     val immersive = route == "calibration" || route == "test"
+    val updates = remember(activity) { activity.releaseUpdates }
+    val updateOffer by updates.offer.collectAsStateWithLifecycle()
+    LaunchedEffect(route, updateOffer?.tag) {
+        if (route == SettingsPage.UPDATES.route) updates.dismissOffer()
+    }
     val scroll = remember(appearance.hideOnScroll, route) {
         object : NestedScrollConnection {
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
@@ -262,6 +268,7 @@ fun AppNavigation(model: AppViewModel, activity: Activity) {
                                             SettingsPage.SYSTEM -> SystemPreferences(state, model, onAppearance = {
                                                 if (nav.currentDestination?.route == page.route) nav.navigate(SettingsPage.APPEARANCE.route)
                                             })
+                                            SettingsPage.UPDATES -> UpdatePreferences(activity, updates)
                                             SettingsPage.ABOUT -> AboutPreferences(state, model)
                                             SettingsPage.APPEARANCE -> AppearancePreferences(model.preferences)
                                         }
@@ -292,6 +299,22 @@ fun AppNavigation(model: AppViewModel, activity: Activity) {
                 }
                 BackHandler(enabled = !appearance.predictiveBack && route != StudioTab.LIBRARY.route && route != "test" && !quickMenu) {
                     nav.popBackStack()
+                }
+                updateOffer?.let { release ->
+                    if (!immersive && !quickMenu && route != StudioTab.PLAYER.route && route != SettingsPage.UPDATES.route) {
+                        ProductDialog(
+                            title = stringResource(R.string.update_available),
+                            onClose = updates::dismissOffer,
+                            confirm = stringResource(R.string.update_show),
+                            onConfirm = {
+                                updates.dismissOffer()
+                                nav.navigate(SettingsPage.UPDATES.route) { launchSingleTop = true }
+                            },
+                        ) {
+                            SupportingText(stringResource(R.string.update_latest, release.tag))
+                            SupportingText(versionSummary())
+                        }
+                    }
                 }
                 if (quickMenu) ProductSheet(stringResource(R.string.studio_routes), { quickMenu = false }) {
                     StudioTab.entries.forEach { item ->

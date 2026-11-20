@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="game_music_center">音乐中心</string>
+    <string name="game_music_online">在线</string>
+    <string name="game_music_saved">本地</string>
+    <string name="game_music_recent">最近</string>
+    <string name="game_music_favorites">收藏</string>
+    <string name="game_music_favorite">收藏曲谱</string>
+    <string name="game_music_unfavorite">取消收藏</string>
+    <string name="game_music_history">搜索历史</string>
+    <string name="game_music_clear_history">清空搜索历史</string>
+    <string name="game_music_clear_query">清空搜索</string>
+    <string name="game_music_search_hint">曲名、作者、上传者或标签</string>
+    <string name="game_music_playback_search_blocked">可浏览曲库，停止演奏后可输入搜索。</string>
+    <string name="game_music_no_matches">暂无匹配曲谱</string>
+    <string name="game_music_browse_latest">最近更新</string>
+    <string name="game_music_previous">上一首</string>
+    <string name="game_music_next">下一首</string>
+    <string name="game_music_volume_up">增大媒体音量</string>
+    <string name="game_music_volume_down">减小媒体音量</string>
+    <string name="game_music_volume_percent">音量 %1$d%%</string>
+    <string name="game_music_no_space">当前校准布局下，音乐中心没有足够的安全空间。</string>
+    <string name="game_music_compat_unknown">载入后检查兼容性</string>
+    <string name="game_music_cached_track">%1$s · 已下载</string>
+    <string name="game_music_recent_track">%1$s · %2$s</string>
+    <string name="game_music_online_meta">%1$s · %2$s BPM · %3$s · %4$d 个音符</string>
+    <string name="game_music_saved_done">已加入本地曲库</string>
+    <string name="game_music_unmapped">未映射音符 %1$d 个</string>
+</resources>

@@ -7,6 +7,9 @@ import com.huanhren.deltaharmonica.midi.ScriptConverter
 import com.huanhren.deltaharmonica.midi.ScriptTempo
 import com.huanhren.deltaharmonica.midi.ScriptTimeSignature
 import com.huanhren.deltaharmonica.midi.ScriptTiming
+import com.huanhren.deltaharmonica.midi.ScoreConversionCache
+import com.huanhren.deltaharmonica.midi.ScoreFormat
+import com.huanhren.deltaharmonica.midi.SongCompatibilityAnalyzer
 import com.huanhren.deltaharmonica.model.InstrumentLayout
 import com.huanhren.deltaharmonica.model.InstrumentProfile
 import kotlin.math.roundToLong
@@ -37,8 +40,28 @@ internal object OnlineSongConverter {
         return ScriptConverter.convertTrack(
             notes, fileName, 0, policy, score.transpose + userTranspose, profile, layout,
             ScriptTiming(score.ppq, tempos, signatures), checkActive = checkActive,
-        ).also {
+        ).let {
             require(it.script.events.isNotEmpty()) { "当前乐器配置无法演奏这首曲谱的音高" }
+            it.copy(compatibility = SongCompatibilityAnalyzer.includeSource(
+                it.compatibility, ScoreFormat.DFHS1, score.version, notes, trackCount = 1, nonEmptyTrackCount = 1,
+            ))
+        }
+    }
+
+    suspend fun convertCompressed(
+        compressed: ByteArray,
+        fileName: String,
+        policy: MonophonyPolicy,
+        userTranspose: Int,
+        profile: InstrumentProfile,
+        layout: InstrumentLayout?,
+        checkActive: () -> Unit = {},
+    ): ConversionReport {
+        val key = ScoreConversionCache.key(ScoreConversionCache.sha256(compressed), ScoreFormat.DFHS1, 0,
+            policy, userTranspose, profile, layout)
+        return ScoreConversionCache.getOrConvert(key, fileName) {
+            convert(DfhsDecoder.decode(compressed, checkActive), fileName, policy, userTranspose, profile, layout,
+                checkActive)
         }
     }
 }

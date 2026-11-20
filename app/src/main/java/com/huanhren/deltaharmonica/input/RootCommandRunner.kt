@@ -10,9 +10,16 @@ import java.util.concurrent.TimeUnit
 
 sealed interface RootCommandResult {
     data class Success(val output: String) : RootCommandResult
-    data class Failure(val reason: String) : RootCommandResult
+    data class Failure(val reason: String, val kind: RootCommandFailureKind = RootCommandFailureKind.COMMAND) : RootCommandResult
     data object TimedOut : RootCommandResult
 }
+
+enum class RootCommandFailureKind { LAUNCH, COMMAND }
+
+private val rootDenialMessages = listOf("denied", "not allowed", "not permitted", "unauthorized", "拒绝", "未授权")
+
+internal val RootCommandResult.Failure.authorizationDenied: Boolean
+    get() = rootDenialMessages.any { reason.contains(it, ignoreCase = true) }
 
 fun interface RootCommandRunner {
     suspend fun run(command: String, timeoutMs: Long): RootCommandResult
@@ -28,9 +35,9 @@ class SuCommandRunner(
         val process = try {
             launch(command)
         } catch (e: IOException) {
-            return@withContext RootCommandResult.Failure("未找到 su 或无法启动：${e.localizedMessage}")
+            return@withContext RootCommandResult.Failure("未找到 su 或无法启动：${e.localizedMessage}", RootCommandFailureKind.LAUNCH)
         } catch (e: SecurityException) {
-            return@withContext RootCommandResult.Failure("系统拒绝启动 su")
+            return@withContext RootCommandResult.Failure("系统拒绝启动 su", RootCommandFailureKind.LAUNCH)
         }
         // The pipe can outlive su if one of its descendants inherits stdout.
         val output = CompletableDeferred<Result<String>>()

@@ -64,6 +64,19 @@ class RootBackendTest {
         runner.result = RootCommandResult.TimedOut
         assertEquals(TapResult.TimedOut, backend.tap(ScreenPoint(12f, 25f)))
     }
+
+    @Test fun focusTimeoutRequiresRevalidationInsteadOfPollingSuAgain() = runTest {
+        val runner = Runner(RootCommandResult.Success("0"))
+        val backend = RootBackend(runner) { ScreenSize(100, 200) }
+        backend.checkAccess()
+        runner.result = RootCommandResult.TimedOut
+
+        assertNull(backend.focusedPackage())
+        assertFalse(backend.status().available)
+        assertNull(backend.focusedPackage())
+        assertEquals(2, runner.commands.size)
+    }
+
     @Test fun focusQueryCanProceedWhileInputCommandIsRunning() = runTest {
         val release = CompletableDeferred<Unit>()
         val runner = RootCommandRunner { command, _ ->

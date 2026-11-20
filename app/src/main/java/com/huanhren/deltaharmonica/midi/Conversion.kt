@@ -12,11 +12,16 @@ data class MidiNote(val startMs: Long, val durationMs: Long, val pitch: Int, val
 }
 data class MonoResult(val notes: List<MidiNote>, val discardedMs: Long)
 object Monophony {
-    fun convert(input: List<MidiNote>, policy: MonophonyPolicy): MonoResult {
+    fun convert(input: List<MidiNote>, policy: MonophonyPolicy, checkActive: () -> Unit = {}): MonoResult {
         require(input.size <= 100_000) { "音符数量超过限制" }
         data class Edge(val time: Long, val begin: Boolean, val id: Int)
-        val edges = input.flatMapIndexed { i, n -> listOf(Edge(n.startMs, true, i), Edge(n.startMs+n.durationMs, false, i)) }
-            .sortedWith(compareBy<Edge> { it.time }.thenBy { it.begin }.thenBy { it.id })
+        val edges = ArrayList<Edge>(input.size * 2)
+        input.forEachIndexed { index, note ->
+            if (index % 1024 == 0) checkActive()
+            edges.add(Edge(note.startMs, true, index))
+            edges.add(Edge(note.startMs + note.durationMs, false, index))
+        }
+        edges.sortWith(compareBy<Edge> { it.time }.thenBy { it.begin }.thenBy { it.id })
         val comparator = Comparator<Int> { a,b ->
             val x = input[a]; val y = input[b]
             val v = when(policy) {
@@ -30,7 +35,8 @@ object Monophony {
         val queue = PriorityQueue(comparator)
         val output = mutableListOf<Pair<Int,MidiNote>>()
         var previous: Long? = null
-        for (edge in edges) {
+        for ((index, edge) in edges.withIndex()) {
+            if (index % 1024 == 0) checkActive()
             val last = previous
             if (last != null && edge.time > last) {
                 while (queue.isNotEmpty() && !active[queue.peek()!!]) queue.poll()
@@ -62,7 +68,8 @@ object PitchMapper {
 
     /** Dynamic programming over six region/semitone states; unavailable pitches remain null. */
     fun optimize(profile: InstrumentProfile, pitches: List<Int>, initialRegion: Region? = null,
-                 initialSemitone: Boolean? = null, allowedKeys: Set<Int>? = null): List<PitchChoice?> {
+                 initialSemitone: Boolean? = null, allowedKeys: Set<Int>? = null,
+                 checkActive: () -> Unit = {}): List<PitchChoice?> {
         require(pitches.size <= 200_000)
         val byPitch=(0..127).map { pitch ->
             val states=arrayOfNulls<PitchChoice>(6)
@@ -72,14 +79,22 @@ object PitchMapper {
             }
             states
         }
-        val valid=pitches.indices.filter { pitches[it] in 0..127 && byPitch[pitches[it]].any { c -> c != null } }
+        val valid = IntArray(pitches.size)
+        var validCount = 0
+        pitches.forEachIndexed { index, pitch ->
+            if (index % 1024 == 0) checkActive()
+            if (pitch in 0..127 && byPitch[pitch].any { it != null }) valid[validCount++] = index
+        }
         val result=MutableList<PitchChoice?>(pitches.size) { null }
-        if (valid.isEmpty()) return result
-        val back=Array(valid.size) { IntArray(6) { -1 } }
+        if (validCount == 0) return result
+        val back = ByteArray(validCount * 6) { -1 }
         val inf=Int.MAX_VALUE/4
         var costs=IntArray(6) { inf }
-        valid.forEachIndexed { row,source ->
-            val options=byPitch[pitches[source]]; val next=IntArray(6) { inf }
+        var next = IntArray(6)
+        for (row in 0 until validCount) {
+            if (row % 1024 == 0) checkActive()
+            val options = byPitch[pitches[valid[row]]]
+            next.fill(inf)
             for(state in 0 until 6) {
                 val choice=options[state] ?: continue
                 if(row==0) {
@@ -87,15 +102,21 @@ object PitchMapper {
                 } else for(prev in 0 until 6) {
                     if(costs[prev] == inf) continue
                     val cost=costs[prev]+(if(prev/2 != state/2) 1 else 0)+(if(prev%2 != state%2) 1 else 0)
-                    if(cost < next[state]) { next[state]=cost; back[row][state]=prev }
+                    if (cost < next[state]) {
+                        next[state] = cost
+                        back[row * 6 + state] = prev.toByte()
+                    }
                 }
             }
-            costs=next
+            val previous = costs
+            costs = next
+            next = previous
         }
         var state=(0 until 6).minBy { costs[it] }
-        for(row in valid.lastIndex downTo 0) {
+        for (row in validCount - 1 downTo 0) {
+            if (row % 1024 == 0) checkActive()
             val source=valid[row]; result[source]=byPitch[pitches[source]][state]
-            if(row>0) state=back[row][state]
+            if (row > 0) state = back[row * 6 + state].toInt()
         }
         return result
     }
