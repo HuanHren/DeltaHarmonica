@@ -1494,9 +1494,12 @@ class CalibrationOverlayService : Service() {
                                 onPaused = onPaused,
                                 onResumed = onResumed,
                             )
-                        { onNote, isPaused, onPaused, onResumed ->
+                        val execute: suspend (
+                            (Int, Long?, Long?) -> Unit, () -> Boolean, () -> Unit, () -> Unit
+                        ) -> ContinuousPlaybackResult = { onNote, isPaused, onPaused, onResumed ->
                             runSequence(onNote, isPaused, onPaused, onResumed)
                         }
+                        execute
                     })
             } catch (e: CancellationException) { runtimeState = runtimeState.reset() }
             catch (e: Exception) { runtimeState = runtimeState.reset(); if (!destroyed) Toast.makeText(this@CalibrationOverlayService,"播放或恢复失败：${e.localizedMessage}",Toast.LENGTH_LONG).show() }
