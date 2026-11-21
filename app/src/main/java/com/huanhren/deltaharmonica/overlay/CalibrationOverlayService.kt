@@ -115,6 +115,7 @@ class CalibrationOverlayService : Service() {
         GAME_FOCUS_LOST("已失去游戏焦点"),
         GAME_FOCUS_STALE("游戏焦点观测已过期"),
         GAME_WINDOW_CHANGED("游戏窗口已重建"),
+        RESUME_STATE_CHANGED("恢复演奏前音区或半音状态已变化"),
     }
     private var focusMonitor = FocusMonitor()
     private val focusObservation get() = focusMonitor.observation
@@ -530,7 +531,7 @@ class CalibrationOverlayService : Service() {
                     failure = startPlayback(input, owner)
                 }
             } catch (_: CancellationException) {
-                cancelled = !destroyed
+                cancelled = owner.pendingStopOrigin?.userRequested == true
             } catch (e: Exception) {
                 failure = "准备演奏失败：${e.localizedMessage}"
             }
@@ -1310,7 +1311,7 @@ class CalibrationOverlayService : Service() {
                 fun queueTrack(step: Int) {
                     if (app.model.libraryBusy.value) return
                     queuedTrack = player.adjacentSong(step) ?: return
-                    PlaybackPreparation.stopPlayback(owner)
+                    PlaybackPreparation.stopPlayback(owner, PlaybackStopOrigin.TRACK_CHANGE)
                     removeSessionMusic()
                     updateSessionBar()
                 }
@@ -1361,6 +1362,15 @@ class CalibrationOverlayService : Service() {
             var overlayRestored=false
             var environmentAbort: PlaybackEnvironmentAbort? = null
             var environmentAbortAtMs: Long? = null
+            var coroutineCancelled = false
+            var failedRootReceipt: Pair<Int, String>? = null
+            fun recordEnvironmentAbort(reason: PlaybackEnvironmentAbort) {
+                if (environmentAbort != null) return
+                environmentAbort = reason
+                environmentAbortAtMs = android.os.SystemClock.uptimeMillis()
+                runner.requestStop(PlaybackStopOrigin.ENVIRONMENT_CHANGED)
+                Log.w("DeltaPlayback", "session=$sessionId environmentAbort=$reason")
+            }
             fun environmentValid(): Boolean {
                 val focus = focusObservation
                 val reason = when {
@@ -1375,11 +1385,7 @@ class CalibrationOverlayService : Service() {
                     input == PlaybackInput.ROOT && focus.window != gameWindow -> PlaybackEnvironmentAbort.GAME_WINDOW_CHANGED
                     else -> null
                 }
-                if (reason != null && environmentAbort == null) {
-                    environmentAbort = reason
-                    environmentAbortAtMs = android.os.SystemClock.uptimeMillis()
-                    Log.w("DeltaPlayback", "session=$sessionId environmentAbort=$reason")
-                }
+                reason?.let(::recordEnvironmentAbort)
                 return reason == null
             }
             suspend fun prepareResume() {
@@ -1388,9 +1394,12 @@ class CalibrationOverlayService : Service() {
                 if (sessionBar?.expanded == true) resizeSessionBar(false) else updateSessionBar()
                 verifySessionWindow()
             }
-            fun recordRootReceipt(receipt: RootTouchOutcome) {
+            fun recordRootReceipt(sourceIndex: Int, receipt: RootTouchOutcome) {
                 if (receipt.noteDown != null) noteDownReceipts++
                 if (receipt.noteUp != null) noteUpReceipts++
+                if (receipt.status != "OK" && failedRootReceipt == null) {
+                    failedRootReceipt = sourceIndex to receipt.status
+                }
             }
             suspend fun playRoot(connection: RootGestureConnection, gesture: CombinedGesture, index: Int?, duration: Long): TapResult {
                 if (gesture.strokes.any { !root.validPoint(it.point) }) return TapResult.InvalidPoint("坐标不在默认屏幕内")
@@ -1399,7 +1408,7 @@ class CalibrationOverlayService : Service() {
                     val down = timing.noteDown
                     val up = timing.noteUp
                     if (index != null) {
-                        recordRootReceipt(timing)
+                        recordRootReceipt(index, timing)
                         if (down != null) PlaybackPreparation.recordTiming(index, ActualTiming(
                             down - sessionStartMs, up?.minus(sessionStartMs), 0, duration, "Root ${timing.status}",
                         ))
@@ -1419,15 +1428,16 @@ class CalibrationOverlayService : Service() {
             try {
                 ensureActive()
                 fun stopBeforeDispatch(): Boolean {
-                    if (!runner.stopRequested) return false
-                    outcome = PlaybackResult(0, fresh.events.size, true, null, 0, 0)
+                    val origin = runner.stopOrigin ?: return false
+                    outcome = PlaybackResult(0, fresh.events.size, origin.userRequested,
+                        if (origin.userRequested) null else overlayText(R.string.overlay_interrupted), 0, 0)
                     return true
                 }
                 if (stopBeforeDispatch()) return@launch
                 if (input == PlaybackInput.ROOT) {
                     touch = gameUid()?.let { uid ->
                         val volumeStop: (() -> Unit)? = if (app.preferences.volumeStop.value) ({
-                            PlaybackPreparation.stopPlayback(owner)
+                            PlaybackPreparation.stopPlayback(owner, PlaybackStopOrigin.VOLUME_KEY)
                         }) else null
                         root.openTouch(uid, volumeStop)
                     }
@@ -1567,10 +1577,12 @@ class CalibrationOverlayService : Service() {
                             resumeConfirmedUntil = -1L
                             PlaybackPreparation.confirmResume = {
                                 val expected = pausedState
-                                if (expected == null || expected != runtimeState || expected.semitoneEnabled == null ||
-                                    !environmentValid()) {
+                                val validEnvironment = environmentValid()
+                                val controlsMatch = expected != null && expected == runtimeState && expected.semitoneEnabled != null
+                                if (!validEnvironment || !controlsMatch) {
+                                    if (!controlsMatch) recordEnvironmentAbort(PlaybackEnvironmentAbort.RESUME_STATE_CHANGED)
                                     runtimeState = runtimeState.reset()
-                                    PlaybackPreparation.stopPlayback(owner)
+                                    PlaybackPreparation.stopPlayback(owner, PlaybackStopOrigin.ENVIRONMENT_CHANGED)
                                     false
                                 } else {
                                     val now = android.os.SystemClock.uptimeMillis()
@@ -1659,7 +1671,7 @@ class CalibrationOverlayService : Service() {
                                 stop = { runner.stopRequested || !environmentValid() },
                                 stopImmediately = { runner.stopRequested },
                                 pause = isPaused,
-                                onReceipt = { _, receipt -> recordRootReceipt(receipt) },
+                                onReceipt = { index, receipt -> recordRootReceipt(fresh.events[index].sourceIndex, receipt) },
                                 onNote = { index, down, up ->
                                     val item = fresh.events[index]
                                     if (item.regionSwitch)
@@ -1683,7 +1695,10 @@ class CalibrationOverlayService : Service() {
                                 beforeResume = {
                                     withTimeoutOrNull(2_000L) {
                                         prepareResume()
-                                        environmentValid() && pausedState == runtimeState && runtimeState.semitoneEnabled != null
+                                        val validEnvironment = environmentValid()
+                                        val controlsMatch = pausedState == runtimeState && runtimeState.semitoneEnabled != null
+                                        if (!controlsMatch) recordEnvironmentAbort(PlaybackEnvironmentAbort.RESUME_STATE_CHANGED)
+                                        validEnvironment && controlsMatch
                                     } == true
                                 },
                                 onTiming = { index, planned, down, up ->
@@ -1709,8 +1724,8 @@ class CalibrationOverlayService : Service() {
                         }
                         execute
                     })
-            } catch (e: CancellationException) {
-                // Terminal cancellation is published after any live Root connection is closed.
+            } catch (_: CancellationException) {
+                coroutineCancelled = true
             } catch (e: Exception) {
                 executionFailure = "播放或恢复失败：${e.localizedMessage}"
                 Log.w("DeltaPlayback", "session=$sessionId playback failed", e)
@@ -1727,11 +1742,14 @@ class CalibrationOverlayService : Service() {
                     Log.e("DeltaPlayback", "session=$sessionId rootSession=$rootSessionId cleanup failed", e)
                     RootCleanup.NO_ACK
                 }
+                val origin = runner.stopOrigin
+                val abort = environmentAbort ?:
+                    if (origin == PlaybackStopOrigin.OVERLAY_CLOSED) PlaybackEnvironmentAbort.OVERLAY_CLOSED else null
                 val failure = when {
                     root.releaseUncertain -> root.status().message
                     cleanup?.confirmed == false -> "Root 清理未确认，请在设置中恢复 Root 输入状态"
                     cleanup == RootCleanup.OBSERVED_IDLE -> "游戏触摸中断，Android 输入队列已清理"
-                    outcome?.failure != null -> environmentAbort?.message ?: outcome?.failure
+                    outcome?.failure != null -> abort?.message ?: outcome?.failure
                     else -> executionFailure
                 }
                 if (failure != null || outcome?.stopped != false) {
@@ -1743,32 +1761,41 @@ class CalibrationOverlayService : Service() {
                 val current = PlaybackPreparation.progress.value
                 val completed = outcome?.completed ?: current.completed
                 val elapsedMs = outcome?.elapsedMs ?: runner.elapsedMs()
+                val rootTermination = outcome?.rootTermination
                 val diagnosticResult = when {
-                    root.releaseUncertain -> "RECOVERY_REQUIRED"
-                    cleanup?.confirmed == false -> "CLEANUP_UNCONFIRMED"
-                    cleanup == RootCleanup.OBSERVED_IDLE -> "CLEANUP_OBSERVED_IDLE"
+                    rootTermination == RootSequenceTermination.COMPLETED -> rootTermination.name
+                    outcome?.stopped == true -> origin?.name ?: "STOP_CONFIRMED"
+                    abort != null -> abort.name
+                    rootTermination != null -> rootTermination.name
                     executionFailure != null -> "PLAYBACK_EXCEPTION"
+                    coroutineCancelled -> "COROUTINE_CANCELLED"
                     outcome == null -> "INTERRUPTED"
-                    failure != null -> environmentAbort?.name ?: "PLAYBACK_FAILED"
-                    outcome?.stopped == true -> "USER_STOPPED"
+                    outcome?.failure != null -> "PLAYBACK_FAILED"
                     else -> "COMPLETED"
+                }
+                val conflictSummary = fresh.rootTimingConflicts.take(4).joinToString(",") {
+                    "${it.sourceIndex}/${it.constraint}/${it.availableMs}/${it.requiredMs}/${it.repeatedKey}/${it.controlSetupMs}"
                 }
                 val summary = "planned=${fresh.events.size} completed=$completed remaining=${fresh.events.size - completed} " +
                     "noteDownReceipts=$noteDownReceipts noteUpReceipts=$noteUpReceipts elapsedMs=$elapsedMs " +
+                    "failedSourceIndex=${failedRootReceipt?.first} failedReceiptStatus=${failedRootReceipt?.second} " +
                     "startUptimeMs=$playbackStartedAtMs stopRequestUptimeMs=${runner.stopRequestedAtMs} " +
-                    "environmentAbortUptimeMs=$environmentAbortAtMs " +
+                    "stopOrigin=$origin environmentAbort=$abort environmentAbortUptimeMs=$environmentAbortAtMs " +
                     "switchesRegion=${outcome?.regionSwitches} switchesSemitone=${outcome?.semitoneSwitches} " +
-                    "cleanup=$cleanup result=$diagnosticResult ${rootMetrics?.summary().orEmpty()}"
+                    "rootTermination=$rootTermination cleanup=$cleanup result=$diagnosticResult " +
+                    "timingConflicts=${fresh.rootTimingConflicts.size} " +
+                    "firstTimingConflicts(index/constraint/available/required/repeatedKey/controlSetup)=$conflictSummary " +
+                    rootMetrics?.summary().orEmpty()
                 Log.i("DeltaPlayback", "session=$sessionId $summary")
                 rootSessionId?.let { id ->
-                    runCatching { root.recordDiagnostic(id, summary) }.onFailure {
+                    runCatching { root.recordDiagnostic(id, summary, diagnosticResult) }.onFailure {
                         Log.w("DeltaPlayback", "session=$id could not record diagnostics", it)
                     }
                 }
                 val terminal = current.copy(phase=if(outcome == null || failure != null) PlaybackStatus.FAILED else PlaybackStatus.COMPLETED,
                     elapsedMs = elapsedMs, stopped = outcome?.stopped == true, state = when {
                     failure != null -> "失败：$failure"
-                    outcome == null -> overlayText(R.string.overlay_interrupted)
+                    outcome == null -> abort?.message ?: overlayText(R.string.overlay_interrupted)
                     outcome?.stopped == true -> overlayText(
                         if (!destroyed && panelAttached) R.string.overlay_stopped_restored else R.string.overlay_stopped_check,
                     )
@@ -1821,7 +1848,7 @@ class CalibrationOverlayService : Service() {
         destroyed = true
         playbackSession?.let {
             Log.w("DeltaPlayback", "overlay service destroyed during session")
-            PlaybackPreparation.stopPlayback(it)
+            PlaybackPreparation.stopPlayback(it, PlaybackStopOrigin.OVERLAY_CLOSED)
         }
         loadingPlayback?.let { prepared ->
             if (PlaybackPreparation.pending === prepared) rejectPendingStart(overlayText(R.string.overlay_interrupted))
