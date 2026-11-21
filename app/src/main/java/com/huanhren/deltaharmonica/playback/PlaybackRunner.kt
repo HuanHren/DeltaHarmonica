@@ -8,22 +8,37 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
-data class ContinuousPlaybackResult(val completed: Int, val result: TapResult, val maxLatenessMs: Long = 0)
+enum class RootSequenceTermination {
+    COMPLETED, STOP_CONFIRMED, RESUME_DENIED, INPUT_REJECTED, TIMELINE_LATE, TRANSPORT_LOST,
+    RELEASE_UNCONFIRMED, DISPATCHER_FAILED, PROTOCOL_ERROR, RECEIPT_TIMEOUT, LEASE_EXPIRED, UNKNOWN_CANCELLATION,
+}
+
+data class ContinuousPlaybackResult(
+    val completed: Int,
+    val result: TapResult,
+    val maxLatenessMs: Long = 0,
+    val rootTermination: RootSequenceTermination? = null,
+)
+
+internal enum class PlaybackStopOrigin(val userRequested: Boolean) {
+    USER_STOP(true), VOLUME_KEY(true), TRACK_CHANGE(true), OVERLAY_CLOSED(false), ENVIRONMENT_CHANGED(false),
+}
 
 enum class PlaybackPhase { READY, HIDING, RUNNING, STOP_REQUESTED, WAITING_FOR_GESTURE, GESTURE_FINISHED, PAUSED, RESUMED, TERMINATED, RESTORING, RESTORED }
 data class PlaybackResult(val completed: Int, val remaining: Int, val stopped: Boolean, val failure: String?, val maxLatenessMs: Long, val elapsedMs: Long,
-    val regionSwitches: Int = 0, val semitoneSwitches: Int = 0)
+    val regionSwitches: Int = 0, val semitoneSwitches: Int = 0, val rootTermination: RootSequenceTermination? = null)
 class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
     constructor() : this({ System.nanoTime() / 1_000_000 })
 
     private companion object {
         const val WINDOW_TIMEOUT_MS = 3_000L
-        const val STOP_NOT_REQUESTED = Long.MIN_VALUE
     }
 
-    private val stopAt = AtomicLong(STOP_NOT_REQUESTED)
+    private data class StopRequest(val origin: PlaybackStopOrigin, val atMs: Long)
+
+    private val stop = AtomicReference<StopRequest>()
     private val mutex = Mutex()
     private val pause = AtomicBoolean(false)
     private var startedAt: Long? = null
@@ -39,10 +54,14 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
 
     fun requestPause() { pause.set(true) }
     fun requestResume() { pause.set(false) }
-    fun requestStop() { stopAt.compareAndSet(STOP_NOT_REQUESTED, nowMs()) }
+    fun requestStop() = requestStop(PlaybackStopOrigin.USER_STOP)
+    internal fun requestStop(origin: PlaybackStopOrigin) {
+        stop.compareAndSet(null, StopRequest(origin, nowMs()))
+    }
     internal val pauseRequested: Boolean get() = pause.get()
-    internal val stopRequestedAtMs: Long? get() = stopAt.get().takeUnless { it == STOP_NOT_REQUESTED }
-    internal val stopRequested: Boolean get() = stopRequestedAtMs != null
+    internal val stopRequestedAtMs: Long? get() = stop.get()?.atMs
+    internal val stopOrigin: PlaybackStopOrigin? get() = stop.get()?.origin
+    internal val stopRequested: Boolean get() = stop.get() != null
     internal fun continuousStarted(helperUptimeMs: Long) { startedAt = helperUptimeMs }
     suspend fun run(plan: PlaybackPlan, hide: () -> Unit, awaitWindows: suspend () -> Unit, valid: () -> Boolean,
                     dispatch: suspend (String,Long) -> TapResult, restore: () -> Unit,
@@ -63,6 +82,7 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
         finishedElapsedMs = null
         var completed=0; var failure: String?=null; var maxLate=0L; var regionSwitches=0; var semitoneSwitches=0
         var acknowledgedStop = false
+        var rootTermination: RootSequenceTermination? = null
         suspend fun waitUntil(target: Long): Boolean {
             while (true) {
                 if (stopRequested) return false
@@ -137,14 +157,24 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
                         },
                     )
                     maxLate = maxOf(maxLate, continuous.maxLatenessMs)
-                    if (continuous.completed != completed) {
+                    rootTermination = continuous.rootTermination
+                    if (continuous.completed != completed ||
+                        (continuous.result == TapResult.Completed && completed != plan.events.size)
+                    ) {
+                        rootTermination = RootSequenceTermination.PROTOCOL_ERROR
                         failure = "Root 逐音计数不一致，释放状态需检查"
-                    } else if (continuous.result == TapResult.Cancelled && stopRequested) {
+                    } else if (continuous.result == TapResult.Completed) {
+                        rootTermination = RootSequenceTermination.COMPLETED
+                    } else if (continuous.result == TapResult.Cancelled && stopOrigin?.userRequested == true &&
+                        (rootTermination == null || rootTermination == RootSequenceTermination.STOP_CONFIRMED)
+                    ) {
                         acknowledgedStop = true
-                    } else if (continuous.result != TapResult.Completed) {
+                        rootTermination = RootSequenceTermination.STOP_CONFIRMED
+                    } else {
+                        if (continuous.result == TapResult.Cancelled && rootTermination == null) {
+                            rootTermination = RootSequenceTermination.UNKNOWN_CANCELLATION
+                        }
                         failure = "Root 连续触控未完成：${continuous.result}"
-                    } else if (!valid()) {
-                        failure = "连续触控结束时游戏环境已变化"
                     }
                 } else for (item in plan.events) {
                     onEvent(completed,item.event.noteKeyId,false)
@@ -200,7 +230,12 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
             } finally { mutex.unlock() }
         }
         onPhase(PlaybackPhase.TERMINATED)
-        val stopped = acknowledgedStop || (completed < plan.events.size && stopRequested)
-        return PlaybackResult(completed,plan.events.size-completed,stopped,failure,maxLate,elapsedMs(),regionSwitches,semitoneSwitches)
+        val origin = stopOrigin
+        if (failure == null && completed < plan.events.size && origin?.userRequested == false) {
+            failure = "演奏环境已变化"
+        }
+        val stopped = failure == null && (acknowledgedStop || (completed < plan.events.size && origin?.userRequested == true))
+        return PlaybackResult(completed, plan.events.size - completed, stopped, failure, maxLate, elapsedMs(),
+            regionSwitches, semitoneSwitches, rootTermination)
     }
 }

@@ -30,6 +30,7 @@ internal data class RootSequenceOutcome(val status: String, val completed: Int) 
  * waitFor(deadline) returns the extra milliseconds spent paused while waiting.
  * The root worker never pauses an active note: it releases the current note
  * before waiting to start the next one.
+ * onScheduledNote also identifies a note that was too late to begin.
  */
 internal object RootSequenceTimeline {
     fun play(
@@ -76,25 +77,30 @@ internal object RootSequenceTimeline {
             }
             // Never turn a stalled game/input dispatcher into a fast burst of stale notes.
             val plannedStart = startAt + pauseShift
-            if (now() - plannedStart > step.maxLatenessMs + ROOT_RECOVERY_WINDOW_MS)
+            val plannedNoteAt = origin + step.noteAtMs + pauseShift
+            if (now() - plannedStart > step.maxLatenessMs + ROOT_RECOVERY_WINDOW_MS) {
+                onScheduledNote(index, RootTouchOutcome("LATE", null, null), plannedNoteAt)
                 return RootSequenceOutcome("LATE", completed)
+            }
             val receipt = try {
                 playTimedGesture?.invoke(step, plannedStart) ?: playGesture(step.strokes)
             } catch (_: Exception) {
                 return RootSequenceOutcome("UNCONFIRMED", completed)
             }
             releasedAt = now()
-            val plannedNoteAt = origin + step.noteAtMs + pauseShift
             val down = receipt.noteDown
             val up = receipt.noteUp
-            val outcome = if (receipt.completed && (down == null || down < plannedNoteAt || up == null || up <= down)) {
+            val hold = step.strokes.last().durationMs
+            val outcome = if (receipt.completed &&
+                (down == null || down < plannedNoteAt || up == null || up <= down || up - down < hold)
+            ) {
                 receipt.copy(status = "UNCONFIRMED", noteUp = null)
             } else receipt
             onScheduledNote(index, outcome, plannedNoteAt)
             onNote(index, outcome)
             if (!outcome.completed) return RootSequenceOutcome(outcome.status, completed)
             completed++
-            previousPlannedUp = step.noteAtMs + step.strokes.last().durationMs
+            previousPlannedUp = step.noteAtMs + hold
             val noteDelay = checkNotNull(down) - (plannedStart + lead)
             if (noteDelay > step.maxLatenessMs) {
                 // Preserve the phase after a recoverable stall instead of replaying stale events.

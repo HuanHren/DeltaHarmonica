@@ -3,14 +3,20 @@ package com.huanhren.deltaharmonica.input
 import kotlinx.coroutines.delay
 
 internal enum class RootRecoveryResult {
-    CONFIRMED, HELPER_ALIVE, HELPER_UNKNOWN, DISPATCHER_UNCONFIRMED, JOURNAL_FAILURE,
+    CONFIRMED, HELPER_ALIVE, HELPER_UNKNOWN, DISPATCHER_UNCONFIRMED, DISPATCHER_UNRESPONSIVE,
+    AUTHORIZATION_LOST, JOURNAL_FAILURE, DEADLINE_EXCEEDED, RETRY_LIMIT, INTERRUPTED, PROBE_FAILED,
 }
 
 /** Only reads process and dispatcher state. Never sends a gesture to the current window. */
-internal class RootRecoveryProbe(private val runner: RootCommandRunner) {
+internal class RootRecoveryProbe(
+    private val awaitSample: suspend (Long) -> Unit,
+    private val runner: RootCommandRunner,
+) {
+    constructor(runner: RootCommandRunner) : this({ delay(it) }, runner)
+
     suspend fun verify(record: RootReleaseRecord): RootRecoveryResult {
         repeat(2) { sample ->
-            if (sample != 0) delay(100)
+            if (sample != 0) awaitSample(100)
             val helper = record.helper
             val exit = when {
                 helper != null -> readProcessExit(helper)
@@ -18,9 +24,14 @@ internal class RootRecoveryProbe(private val runner: RootCommandRunner) {
                 else -> RootRecoveryResult.HELPER_UNKNOWN
             }
             if (exit != RootRecoveryResult.CONFIRMED) return exit
-            val snapshot = read(dispatcherCommand)
-            if (snapshot == null || !dispatcherIsQuiescent(snapshot)) {
-                return RootRecoveryResult.DISPATCHER_UNCONFIRMED
+            when (val snapshot = runner.run(dispatcherCommand, QUERY_TIMEOUT_MS)) {
+                RootCommandResult.TimedOut -> return RootRecoveryResult.DISPATCHER_UNRESPONSIVE
+                is RootCommandResult.Failure -> return if (snapshot.authorizationDenied) {
+                    RootRecoveryResult.AUTHORIZATION_LOST
+                } else RootRecoveryResult.DISPATCHER_UNCONFIRMED
+                is RootCommandResult.Success -> if (!dispatcherIsQuiescent(snapshot.output)) {
+                    return RootRecoveryResult.DISPATCHER_UNCONFIRMED
+                }
             }
         }
         return RootRecoveryResult.CONFIRMED
@@ -51,9 +62,10 @@ internal class RootRecoveryProbe(private val runner: RootCommandRunner) {
     }
 
     private suspend fun read(command: String): String? =
-        (runner.run(command, 1_200) as? RootCommandResult.Success)?.output?.trim()
+        (runner.run(command, QUERY_TIMEOUT_MS) as? RootCommandResult.Success)?.output?.trim()
 
     private companion object {
+        const val QUERY_TIMEOUT_MS = 1_200L
         val rootCheck = """[ "$(id -u)" = 0 ] && [ -r /proc/1/stat ] || exit 1"""
 
         // app_process retains its argv when --nice-name is absent. Split the class name

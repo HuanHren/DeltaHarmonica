@@ -14,11 +14,15 @@ class RootSequenceProtocolTest {
         val sessionId = "2a1e96c6-c578-4f21-92ed-b4dcbbe13caa"
         assertTrue(RootSequenceProtocol.validSessionId(sessionId))
         assertFalse(RootSequenceProtocol.validSessionId("1-1-1-1-1"))
-        assertEquals(RootHelperIdentity(73, 190_892), RootSequenceProtocol.decodeReady("READY 3 $sessionId 73 190892", sessionId))
-        assertNull(RootSequenceProtocol.decodeReady("READY 2 $sessionId 73 190892", sessionId))
-        assertNull(RootSequenceProtocol.decodeReady("READY 3 wrong-token 73 190892", sessionId))
-        assertNull(RootSequenceProtocol.decodeReady("READY 3 $sessionId 1 190892", sessionId))
-        assertNull(RootSequenceProtocol.decodeReady("READY 3 $sessionId 73 0", sessionId))
+        val dispatcherId = "72024017-6f2f-4cc5-b52e-44d78d12a3f7"
+        val reply = RootSequenceProtocol.decodeFrame("DELTA $sessionId $dispatcherId 0 READY 4 73 190892", sessionId)
+        assertEquals(0L, reply?.operation)
+        assertEquals(dispatcherId, reply?.dispatcherId)
+        assertEquals(RootHelperIdentity(73, 190_892), reply?.payload?.let(RootSequenceProtocol::decodeReady))
+        assertNull(RootSequenceProtocol.decodeReady("READY 3 73 190892"))
+        assertNull(RootSequenceProtocol.decodeFrame("DELTA wrong-token $dispatcherId 0 READY 4 73 190892", sessionId))
+        assertNull(RootSequenceProtocol.decodeReady("READY 4 1 190892"))
+        assertNull(RootSequenceProtocol.decodeReady("READY 4 73 0"))
     }
 
     @Test fun processStartTicksSurviveSpacesAndParensInCommandName() {

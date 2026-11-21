@@ -25,4 +25,15 @@ class NoteActionTest {
         assertEquals(TapResult.TimedOut, gate.run { TapResult.TimedOut })
         assertTrue(gate.run { throw IllegalStateException("failure") } is TapResult.Unavailable)
     }
+
+    @Test fun rootReleaseGateIsRecheckedUnderTheDispatchLockImmediatelyBeforeInput() = runBlocking {
+        var blocked = true
+        val gate = NoteActionGate {
+            assertFalse(inputDispatchMutex.tryLock())
+            if (blocked) "Root release pending" else null
+        }
+        assertEquals(TapResult.Unavailable("Root release pending"), gate.run { error("No input while release is pending") })
+        blocked = false
+        assertEquals(TapResult.Completed, gate.run { TapResult.Completed })
+    }
 }

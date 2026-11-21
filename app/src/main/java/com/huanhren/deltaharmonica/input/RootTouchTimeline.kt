@@ -3,6 +3,7 @@ package com.huanhren.deltaharmonica.input
 internal data class RootStroke(val x: Float, val y: Float, val startMs: Long, val durationMs: Long)
 internal enum class RootTouchKind { DOWN, UP, CANCEL }
 internal class RootDispatchDenied : Exception()
+internal class RootDispatchSuppressed(val reason: Exception) : Exception()
 internal class RootTransportInterrupted : Exception()
 private class RootDownLate : Exception()
 
@@ -92,6 +93,11 @@ internal object RootTouchTimeline {
                         active.remove(id)
                         deadlines.remove(id)
                         throw e
+                    } catch (e: RootDispatchSuppressed) {
+                        // The watchdog vetoed this DOWN before the native call began.
+                        active.remove(id)
+                        deadlines.remove(id)
+                        throw e.reason
                     }
                     if (sequential) deadlines[id] = now() + stroke.durationMs
                     if (id == note) noteDown = time

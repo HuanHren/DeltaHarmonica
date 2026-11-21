@@ -62,6 +62,14 @@ class RootRecoveryProbeTest {
         assertEquals(RootRecoveryResult.HELPER_UNKNOWN, probe.verify(record))
     }
 
+    @Test fun systemDispatcherTimeoutIsDistinctFromAnActiveTouchOrAnInvalidDump() = runTest {
+        val probe = RootRecoveryProbe(RootCommandRunner { command, _ ->
+            if (command.contains("/proc/77/stat")) RootCommandResult.Success("DELTA_GONE 77")
+            else RootCommandResult.TimedOut
+        })
+        assertEquals("DISPATCHER_UNRESPONSIVE", probe.verify(record).name)
+    }
+
     private fun procStat(startTicks: Long): String =
         "77 (process with ) in name) S " + List(18) { "0" }.joinToString(" ") + " $startTicks 1 2"
 

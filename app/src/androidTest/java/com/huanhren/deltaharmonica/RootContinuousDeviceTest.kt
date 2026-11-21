@@ -289,7 +289,7 @@ class RootContinuousDeviceTest {
                 ShellProcess(instrumentation.uiAutomation.executeShellCommandRw("/system/bin/sh -es")).use { process ->
                     process.outputStream.write("$command\n".toByteArray(Charsets.US_ASCII))
                     process.outputStream.flush()
-                    val touch = RootGestureConnection(process, null)
+                    val touch = RootGestureConnection(process, null, sessionId)
                     var failure: Throwable? = null
                     try {
                         check(touch.awaitReady(sessionId)) { "Isolated shell Root helper did not become ready" }

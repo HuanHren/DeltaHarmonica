@@ -8,8 +8,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.io.InputStreamReader
 import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
@@ -21,6 +23,33 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class RootGestureConnectionTest {
     private val note = RootSequenceStep(0, listOf(RootStroke(1f, 2f, 0, 45)))
+
+    @Test fun aDelayedPreviousOperationCannotCompleteOrAbortTheCurrentNote() = fixture(
+        peer = {
+            acceptSingleNote()
+            expect("SEQ 1 RUN 0")
+            reply("SEQ 1 START 1000")
+            reply("SEQ 1 EVENT 0 OK 1000 1000 1045")
+            reply("SEQ 1 END OK 1")
+            acceptSingleNote(2)
+            expect("SEQ 2 RUN 0")
+            reply("SEQ 2 START 2000")
+            reply("SEQ 1 END STOPPED 0")
+            reply("SEQ 2 END STOPPED 0", session = "cdd2c2e6-1fb4-4d31-a813-8f840c583792")
+            reply("SEQ 2 END STOPPED 0", dispatcher = "62d94a72-2968-44b5-b4da-0a1be9ab93d2")
+            reply("SEQ 2 EVENT 0 OK 2000 2000 2045")
+            reply("SEQ 2 END OK 1")
+            acknowledgeEof()
+        },
+        client = {
+            repeat(2) {
+                val result = playSequence(listOf(note), { false }, { false }, { _, _, _ -> }, {}, {})
+                assertEquals(TapResult.Completed, result.result)
+                assertEquals(1, result.completed)
+            }
+            assertEquals(RootCleanup.ACKNOWLEDGED, close())
+        },
+    )
 
     @Test fun stoppingDuringUploadDoesNotCommitPartialTimeline() {
         val stop = java.util.concurrent.atomic.AtomicBoolean()
@@ -143,7 +172,7 @@ class RootGestureConnectionTest {
     }
 
     @Test fun aBlockedCommandWriterTriggersOneProcessTeardownWithoutFakingTheReceipt() = runBlocking {
-        val ready = "DELTA READY ${RootSequenceProtocol.VERSION} $SESSION_ID 73 190892\n"
+        val ready = "DELTA $SESSION_ID $DISPATCHER_ID 0 READY 4 73 190892\n"
         val writing = CountDownLatch(1)
         val teardown = CountDownLatch(1)
         val destroyed = AtomicInteger()
@@ -151,6 +180,10 @@ class RootGestureConnectionTest {
         val answers = PipedOutputStream(answerStream)
         val commands = object : ByteArrayOutputStream() {
             override fun write(bytes: ByteArray, off: Int, len: Int) {
+                if (String(bytes, off, len).trim() == "DELTA $SESSION_ID $DISPATCHER_ID 0 PING") {
+                    answers.write("DELTA $SESSION_ID $DISPATCHER_ID 0 PONG\n".toByteArray())
+                    return
+                }
                 writing.countDown()
                 if (!teardown.await(5, TimeUnit.SECONDS)) error("Writer stranded")
                 throw java.io.IOException("Process closed")
@@ -172,7 +205,7 @@ class RootGestureConnectionTest {
                 return this
             }
         }
-        val connection = RootGestureConnection(process, null)
+        val connection = RootGestureConnection(process, null, SESSION_ID)
         try {
             answers.write(ready.toByteArray())
             assertTrue(connection.awaitReady(SESSION_ID))
@@ -182,6 +215,7 @@ class RootGestureConnectionTest {
             assertTrue(writing.await(2, TimeUnit.SECONDS))
             assertEquals(0, destroyed.get())
             assertEquals(RootCleanup.NO_ACK, connection.close())
+            assertTrue(connection.transportClosed.isCompleted)
             assertTrue(teardown.await(2, TimeUnit.SECONDS))
             assertEquals(RootCleanup.NO_ACK, connection.close())
             assertEquals(1, destroyed.get())
@@ -190,6 +224,47 @@ class RootGestureConnectionTest {
             answers.close()
             teardown.countDown()
         }
+    }
+
+    @Test fun nativeTimeoutDuringStopQuarantinesTheDispatcherWithoutReleaseAck() {
+        val stop = AtomicBoolean()
+        fixture(
+            peer = {
+                acceptSingleNote()
+                expect("SEQ 1 RUN 0")
+                reply("SEQ 1 START 1000")
+                stop.set(true)
+                expect("SEQ 1 STOP")
+                reply("FAULT NATIVE_TIMEOUT POINTERS 0,2", operation = 1)
+            },
+            client = {
+                val result = playSequence(listOf(note), { false }, { false }, { _, _, _ -> }, {}, {}, stopImmediately = stop::get)
+                assertTrue(result.result is TapResult.Unavailable)
+                assertEquals(0, result.completed)
+                assertEquals(RootDispatcherFault.NATIVE_TIMEOUT, dispatcherFault.await())
+                assertEquals(RootDispatcherStatus.UNRESPONSIVE, dispatcherStatus)
+                assertEquals(setOf(0, 2), uncertainPointerIds)
+                assertEquals(RootCleanup.REJECTED, close())
+                assertTrue(transportClosed.isCompleted)
+            },
+        )
+    }
+
+    @Test fun processExitIsDetectedEvenIfAReplyPipeWasInherited() {
+        fixture(
+            monitorProcess = true,
+            peer = {
+                exitWithoutClosingReplies()
+                assertNull(commands.readLine())
+                // Keep stdout open until client teardown. Holding it open defeats EOF detection alone.
+                assertTrue(destroyed.await(3, TimeUnit.SECONDS))
+            },
+            client = {
+                assertEquals(RootDispatcherFault.PEER_EXITED, dispatcherFault.await())
+                assertEquals(RootCleanup.NO_ACK, close())
+                assertTrue(transportClosed.isCompleted)
+            },
+        )
     }
 
     @Test fun helperWatchdogReportsTransportFailureAfterReleasingTouch() = fixture(
@@ -333,7 +408,7 @@ class RootGestureConnectionTest {
                 acceptSingleNote()
                 expect("SEQ 1 RUN 0")
                 reply("SEQ 1 START 1000")
-                repeat(RootSequenceProtocol.BUFFER_SIZE + 8) { reply("SEQ 999 START 1045") }
+                repeat(RootSequenceProtocol.BUFFER_SIZE + 8) { reply("SEQ 1 START 1045") }
                 acknowledgeEof()
                 eof.complete(Unit)
             },
@@ -424,15 +499,18 @@ class RootGestureConnectionTest {
         timeoutMs: Long = 5_000,
         onVolumeDown: (() -> Unit)? = null,
         postVolumeStop: (String, () -> Unit) -> Unit = { _, _ -> error("Unexpected volume reply") },
+        monitorProcess: Boolean = false,
         peer: FakeHelper.() -> Unit,
         client: suspend RootGestureConnection.() -> Unit,
     ) {
         val helper = FakeHelper()
         val served = CompletableFuture<Unit>()
-        val connection = RootGestureConnection(helper, onVolumeDown, postVolumeStop)
+        val connection = RootGestureConnection(helper, onVolumeDown, SESSION_ID, postVolumeStop, monitorProcess)
         Thread({
             try {
-                helper.reply("READY ${RootSequenceProtocol.VERSION} $SESSION_ID 73 190892")
+                helper.reply("READY 4 73 190892")
+                helper.expect("PING")
+                helper.reply("PONG")
                 helper.peer()
                 served.complete(Unit)
             } catch (failure: Throwable) {
@@ -459,12 +537,31 @@ class RootGestureConnectionTest {
         private val commandWriter = PipedOutputStream(commandReader)
         private val replyReader = PipedInputStream(32_768)
         private val replyWriter = PipedOutputStream(replyReader)
-        val commands = commandReader.bufferedReader()
+        val commands = object : BufferedReader(InputStreamReader(commandReader)) {
+            override fun readLine(): String? {
+                val line = super.readLine() ?: return null
+                val fields = line.split(' ', limit = 5)
+                assertEquals(listOf("DELTA", SESSION_ID, DISPATCHER_ID), fields.take(3))
+                val payload = fields[4]
+                val expectedOperation = if (payload.startsWith("SEQ ")) payload.split(' ')[1] else "0"
+                assertEquals(expectedOperation, fields[3])
+                return payload
+            }
+        }
         val output = replyWriter.bufferedWriter()
+        val destroyed = CountDownLatch(1)
+        @Volatile private var exited = false
+
+        fun exitWithoutClosingReplies() { exited = true }
 
         fun expect(line: String) { assertEquals(line, commands.readLine()) }
-        fun reply(payload: String) {
-            output.write("DELTA $payload")
+        fun reply(
+            payload: String,
+            operation: Long = if (payload.startsWith("SEQ ")) payload.split(' ')[1].toLong() else 0,
+            session: String = SESSION_ID,
+            dispatcher: String = DISPATCHER_ID,
+        ) {
+            output.write("DELTA $session $dispatcher $operation $payload")
             output.newLine()
             output.flush()
         }
@@ -485,16 +582,18 @@ class RootGestureConnectionTest {
         override fun getInputStream(): InputStream = replyReader
         override fun getErrorStream(): InputStream = InputStream.nullInputStream()
         override fun waitFor(): Int = 0
-        override fun exitValue(): Int = 0
+        override fun exitValue(): Int = if (exited) 0 else throw IllegalThreadStateException()
         override fun destroy() {
-            runCatching { commandReader.close() }
-            runCatching { replyReader.close() }
-            runCatching { commandWriter.close() }
+            exited = true
+            // End of writer sends EOF to the corresponding reader.
             runCatching { replyWriter.close() }
+            runCatching { commandWriter.close() }
+            destroyed.countDown()
         }
     }
 
     private companion object {
         const val SESSION_ID = "2a1e96c6-c578-4f21-92ed-b4dcbbe13caa"
+        const val DISPATCHER_ID = "72024017-6f2f-4cc5-b52e-44d78d12a3f7"
     }
 }

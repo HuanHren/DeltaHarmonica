@@ -143,6 +143,36 @@ class RootSequenceTimelineTest {
         assertEquals(0, injected)
     }
 
+    @Test fun staleBoundaryReportsWhichNoteWasPreventedBeforeDispatch() {
+        var now = 100L
+        var injected = 0
+        val receipts = mutableListOf<Triple<Int, RootTouchOutcome, Long>>()
+        val result = RootSequenceTimeline.play(
+            listOf(step(0), step(100), step(200)),
+            now = { now },
+            waitFor = { deadline ->
+                now = maxOf(now, deadline)
+                if (injected == 1) now += 161L
+                0L
+            },
+            playGesture = {
+                injected++
+                val down = now
+                now += it.last().durationMs
+                RootTouchOutcome("OK", down, now)
+            },
+            onNote = { _, _ -> },
+            onScheduledNote = { index, receipt, planned -> receipts.add(Triple(index, receipt, planned)) },
+        )
+
+        assertEquals(RootSequenceOutcome("LATE", 1), result)
+        assertEquals(1, injected)
+        assertEquals(listOf(
+            Triple(0, RootTouchOutcome("OK", 100L, 150L), 100L),
+            Triple(1, RootTouchOutcome("LATE", null, null), 200L),
+        ), receipts)
+    }
+
     @Test fun recoverableStallRephasesFollowingNotesAndPaysBackDuringRests() {
         var now = 0L
         var stalledOnce = false
@@ -207,6 +237,7 @@ class RootSequenceTimelineTest {
             RootTouchOutcome("OK", null, 60),
             RootTouchOutcome("OK", 10, 9),
             RootTouchOutcome("OK", 10, 10),
+            RootTouchOutcome("OK", 10, 59),
         )) {
             var gestures = 0
             val events = mutableListOf<String>()

@@ -14,6 +14,7 @@ import com.huanhren.deltaharmonica.playback.PlaybackPlan
 import com.huanhren.deltaharmonica.playback.PlaybackPlanner
 import com.huanhren.deltaharmonica.playback.ROOT_RECOVERY_WINDOW_MS
 import com.huanhren.deltaharmonica.playback.ROOT_STROKE_DISPATCH_MARGIN_MS
+import com.huanhren.deltaharmonica.playback.RootPlaybackMetrics
 import com.huanhren.deltaharmonica.playback.RootPlaybackTiming
 import org.junit.Assert.*
 import org.junit.Test
@@ -39,6 +40,87 @@ class RootSequenceAcceptanceTest {
             val helper = play(plan)
             verifyCompletion(plan, helper)
             reportTimings("B-full-360", speed, plan, helper)
+        }
+    }
+
+    @Test fun mixedScoresKeepTimingAndResourcesBoundedAcrossTheLoadMatrix() {
+        for (count in listOf(8, 16, 32, 360, 1_000, 4_096)) {
+            val source = score(count, listOf(62, 62, 63, 79, 55, 55, 56, 76, 51, 51, 52, 75),
+                listOf(220, 260, 315, 420, 600, 220, 250, 340, 500, 150, 190, 495),
+                listOf(21, 85, 180, 290, 440, 22, 65, 129, 421, 31, 81, 179))
+            for (speed in listOf(1.0, 2.0)) {
+                val plan = prepare(source, speed)
+                assertTrue(plan.regionSwitches > 0)
+                assertTrue(plan.semitoneSwitches > 0)
+                assertTrue(plan.extendedNotes > 0)
+                assertTrue(plan.events.zipWithNext().any { (previous, next) ->
+                    previous.event.noteKeyId == next.event.noteKeyId
+                })
+                val pauseIndex = count / 2
+                val pauseMs = 731L
+                var paused = false
+                val helper = play(plan, beforeTouchWait = { deadline ->
+                    val noteIndex = progress.size
+                    val pauseOffset = if (paused) pauseMs else 0L
+                    val plannedDown = origin + plan.events[noteIndex].predictedStartMs + pauseOffset
+                    if (noteIndex % 4 == 3 && activeTarget == null && deadline == plannedDown) {
+                        now = maxOf(now, deadline) + 5L
+                    }
+                }) {
+                    if (progress.size == pauseIndex && !paused) {
+                        paused = true
+                        now += pauseMs
+                        pauseMs
+                    } else 0L
+                }
+
+                assertTrue(paused)
+                verifyCompletion(plan, helper, pauseIndex, pauseMs, onsetDelay = { if (it % 4 == 3) 5L else 0L })
+                reportTimings("mixed-$count", speed, plan, helper)
+            }
+        }
+    }
+
+    @Test fun aRecoverableDelayAfter342PreservesEveryFollowingDownAndUpAtBothSpeeds() {
+        for (speed in listOf(1.0, 2.0)) {
+            val plan = prepare(fullScore(), speed)
+            val delayMs = timing.maxDownLatenessMs + 17L
+            val helper = play(plan, afterBoundaryWait = {
+                if (progress.size == 342) now += delayMs
+            })
+
+            verifyCompletion(plan, helper, onsetDelay = null)
+            val receipts = helper.scheduledReceipts
+            assertEquals((339..344).toList(), receipts.subList(339, 345).map { it.index })
+            assertEquals((342..359).toList(), receipts.drop(342).map { it.index })
+            // Reserved transport time in the control strokes can absorb part of the stall.
+            val lateness = requireNotNull(receipts[342].outcome.noteDown) - receipts[342].planned
+            assertTrue("${speed}x failed to exercise the recovery window: $lateness ms",
+                lateness in (timing.maxDownLatenessMs + 1L)..delayMs)
+            val final = receipts.last().outcome
+            val (down, up) = helper.noteStrokes.takeLast(2)
+            assertEquals(down.time, final.noteDown)
+            assertEquals(up.time, final.noteUp)
+            assertEquals(up, helper.strokes.last())
+            assertEquals(up.ackTime, helper.now)
+            reportTimings("B-full-360-rephase-after-342", speed, plan, helper)
+        }
+    }
+
+    @Test fun aSeverelyLateBoundaryAfter342DoesNotDispatchAnyOfTheRemaining18Notes() {
+        for (speed in listOf(1.0, 2.0)) {
+            val plan = prepare(fullScore(), speed)
+            val helper = play(plan, afterBoundaryWait = {
+                if (progress.size == 342) now += timing.maxDownLatenessMs + ROOT_RECOVERY_WINDOW_MS + 1L
+            })
+
+            assertEquals(RootSequenceOutcome("LATE", 342), helper.outcome)
+            assertEquals(342, helper.progress.size)
+            assertEquals(342 * 2, helper.noteStrokes.size)
+            assertEquals(ScheduledReceipt(342, RootTouchOutcome("LATE", null, null),
+                helper.origin + plan.events[342].predictedStartMs), helper.scheduledReceipts.last())
+            assertNull(helper.activeTarget)
+            reportTimings("B-full-360-stale-after-342", speed, plan, helper)
         }
     }
 
@@ -71,19 +153,22 @@ class RootSequenceAcceptanceTest {
     }
 
     @Test fun stopDuringFinalHoldReleasesThePointerWithoutCountingTheInterruptedNote() {
-        val plan = prepare(fullScore(), 1.0)
-        val helper = play(plan, beforeTouchWait = { deadline ->
-            if (progress.size == plan.events.lastIndex && activeTarget?.startsWith("NOTE_") == true) {
-                now = deadline - 1
-                throw InterruptedException()
-            }
-        })
-        assertEquals(RootSequenceOutcome("STOPPED", 359), helper.outcome)
-        assertEquals("STOPPED", helper.progress.last().status)
-        assertNull(helper.activeTarget)
-        assertEquals(360, helper.noteStrokes.count { it.kind == RootTouchKind.DOWN })
-        assertEquals(360, helper.noteStrokes.count { it.kind == RootTouchKind.UP })
-        verifyCompletion(plan, play(plan))
+        for (speed in listOf(1.0, 2.0)) {
+            val plan = prepare(fullScore(), speed)
+            val helper = play(plan, beforeTouchWait = { deadline ->
+                if (progress.size == plan.events.lastIndex && activeTarget?.startsWith("NOTE_") == true) {
+                    now = deadline - 1
+                    throw InterruptedException()
+                }
+            })
+            assertEquals(RootSequenceOutcome("STOPPED", 359), helper.outcome)
+            assertEquals("STOPPED", helper.progress.last().status)
+            assertNull(helper.activeTarget)
+            assertEquals(360, helper.noteStrokes.count { it.kind == RootTouchKind.DOWN })
+            assertEquals(360, helper.noteStrokes.count { it.kind == RootTouchKind.UP })
+            reportTimings("B-full-360-stop-during-final-hold", speed, plan, helper)
+            verifyCompletion(plan, play(plan))
+        }
     }
 
     @Test fun boundaryHeartbeatLossPreservesCompletedNotesAndReportsTransportFailure() {
@@ -133,16 +218,38 @@ class RootSequenceAcceptanceTest {
 
     private fun reportTimings(label: String, speed: Double, plan: PlaybackPlan, helper: MockRootHelper) {
         val down = helper.noteStrokes.filter { it.kind == RootTouchKind.DOWN }
-        val latencies = down.zip(plan.events) { stroke, note -> stroke.time - helper.origin - note.predictedStartMs }
-        val holds = helper.noteStrokes.chunked(2).map { (start, end) -> end.time - start.ackTime }
-        println("$label ${speed}x planned=${plan.events.size} dispatched=${down.size} released=${helper.outcome.completed} " +
+        val up = helper.noteStrokes.filter { it.kind == RootTouchKind.UP }
+        val timed = helper.scheduledReceipts.filter { it.outcome.completed }
+        val cancelled = helper.scheduledReceipts.count { it.outcome.status == "STOPPED" }
+        val failures = helper.scheduledReceipts.size - timed.size - cancelled
+        val metrics = RootPlaybackMetrics(timing.maxDownLatenessMs)
+        for ((index, receipt, planned) in timed) {
+            val event = plan.events[index]
+            metrics.record(planned, requireNotNull(receipt.noteDown), requireNotNull(receipt.noteUp),
+                event.predictedEndMs - event.predictedStartMs,
+                event.predictedStartMs - event.requestedStartMs - plan.rootPreRollMs)
+        }
+        val finalUpOffsetMs = timed.lastOrNull()?.let { (index, receipt, planned) ->
+            val event = plan.events[index]
+            requireNotNull(receipt.noteUp) - planned - (event.predictedEndMs - event.predictedStartMs)
+        }
+        val totalDelayMs = timed.sumOf { requireNotNull(it.outcome.noteDown) - it.planned }
+        println("$label ${speed}x planned=${plan.events.size} down=${down.size} up=${up.size} " +
+            "completed=${helper.outcome.completed} cancelled=$cancelled failed=$failures unstarted=${plan.events.size - down.size} " +
             "regionSwitches=${plan.regionSwitches} semitoneSwitches=${plan.semitoneSwitches} " +
             "extendedNotes=${plan.extendedNotes} shortenedNotes=${plan.shortenedNotes} " +
-            "holdMs=${holds.min()}..${holds.max()} maxOnsetLatenessMs=${latencies.max()} " +
-            "plannedMs=${plan.estimatedTotalMs} elapsedMs=${helper.now - helper.origin}")
+            "${metrics.summary()} totalDispatchDelayMs=$totalDelayMs finalCompletedUpOffsetMs=$finalUpOffsetMs " +
+            "plannedMs=${plan.estimatedTotalMs} elapsedMs=${helper.now - helper.origin} " +
+            "activePointerCleared=${helper.activeTarget == null} gameAudio=NOT_TESTED")
     }
 
-    private fun verifyCompletion(plan: PlaybackPlan, helper: MockRootHelper, pauseIndex: Int = 0, pauseMs: Long = 0L) {
+    private fun verifyCompletion(
+        plan: PlaybackPlan,
+        helper: MockRootHelper,
+        pauseIndex: Int = 0,
+        pauseMs: Long = 0L,
+        onsetDelay: ((Int) -> Long)? = { 0L },
+    ) {
         val noteCount = plan.events.size
         assertEquals(RootSequenceOutcome("OK", noteCount), helper.outcome)
         assertEquals(noteCount, helper.progress.count { it.completed })
@@ -185,7 +292,10 @@ class RootSequenceAcceptanceTest {
             assertEquals(RootTouchKind.UP, up.kind)
             assertEquals(planned.event.noteKeyId, down.target)
             assertEquals(down.target, up.target)
-            assertEquals(helper.origin + planned.predictedStartMs + shift, down.time)
+            val targetOnset = helper.origin + planned.predictedStartMs + shift
+            assertEquals(targetOnset, helper.scheduledReceipts[index].planned)
+            if (onsetDelay == null) assertTrue(down.time >= targetOnset)
+            else assertEquals(targetOnset + onsetDelay(index), down.time)
             assertEquals(planned.predictedEndMs - planned.predictedStartMs, up.time - down.ackTime)
             assertTrue(up.time - down.ackTime >= timing.minNoteHoldMs)
             assertEquals(down.time, helper.progress[index].noteDown)
@@ -237,6 +347,7 @@ class RootSequenceAcceptanceTest {
     private fun play(
         plan: PlaybackPlan,
         beforeTouchWait: MockRootHelper.(Long) -> Unit = {},
+        afterBoundaryWait: MockRootHelper.() -> Unit = {},
         atBoundary: MockRootHelper.() -> Long = { 0L },
     ): MockRootHelper {
         val planned = RootSequencePlanner.build(plan, points)
@@ -251,7 +362,10 @@ class RootSequenceAcceptanceTest {
             steps, now = { helper.now },
             waitFor = { deadline ->
                 val pause = helper.atBoundary()
-                if (pause == 0L) helper.now = maxOf(helper.now, deadline)
+                if (pause == 0L) {
+                    helper.now = maxOf(helper.now, deadline)
+                    helper.afterBoundaryWait()
+                }
                 pause
             },
             playGesture = { error("Sequence gestures must use the planned clock") },
@@ -273,11 +387,17 @@ class RootSequenceAcceptanceTest {
                 assertEquals(helper.progress.size, index)
                 helper.progress.add(receipt)
             },
+            onScheduledNote = { index, receipt, planned ->
+                assertEquals(helper.scheduledReceipts.size, index)
+                helper.scheduledReceipts.add(ScheduledReceipt(index, receipt, planned))
+            },
         )
         return helper
     }
 
     private data class EmittedStroke(val kind: RootTouchKind, val target: String, val time: Long, val ackTime: Long)
+
+    private data class ScheduledReceipt(val index: Int, val outcome: RootTouchOutcome, val planned: Long)
 
     private inner class MockRootHelper {
         val origin = 1_000L
@@ -286,6 +406,7 @@ class RootSequenceAcceptanceTest {
         val strokes = mutableListOf<EmittedStroke>()
         val noteStrokes get() = strokes.filter { it.target.startsWith("NOTE_") }
         val progress = mutableListOf<RootTouchOutcome>()
+        val scheduledReceipts = mutableListOf<ScheduledReceipt>()
         lateinit var outcome: RootSequenceOutcome
 
         fun emit(kind: RootTouchKind, stroke: RootStroke, time: Long): Boolean {

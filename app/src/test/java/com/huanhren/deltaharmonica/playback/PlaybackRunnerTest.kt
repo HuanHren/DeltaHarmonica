@@ -110,6 +110,20 @@ class PlaybackRunnerTest {
         assertEquals(5L, runner.stopRequestedAtMs)
     }
 
+    @Test fun laterStopCallbacksDoNotReplaceTheOwningRequestOrigin() {
+        val before = PlaybackPreparation.progress.value
+        val owner = checkNotNull(PlaybackPreparation.beginSession {})
+        try {
+            val runner = PlaybackRunner()
+            assertTrue(PlaybackPreparation.attachRunner(owner, runner))
+            assertTrue(PlaybackPreparation.stopPlayback(owner, PlaybackStopOrigin.VOLUME_KEY))
+            assertTrue(PlaybackPreparation.stopPlayback(owner, PlaybackStopOrigin.OVERLAY_CLOSED))
+            assertEquals(PlaybackStopOrigin.VOLUME_KEY, runner.stopOrigin)
+        } finally {
+            PlaybackPreparation.finishSession(owner, before)
+        }
+    }
+
     @Test fun stopWaitsForCurrentGestureAndRestoresOnce() = runBlocking {
         val plan=PlaybackPlanner.plan(script,layout,Region.NATURAL,false,0,8,1.0)
         val runner=PlaybackRunner(); val started=CompletableDeferred<Unit>(); val release=CompletableDeferred<Unit>()
@@ -301,6 +315,95 @@ class PlaybackRunnerTest {
         assertNull(result.failure)
         assertEquals(1, result.completed)
         assertEquals(7, result.remaining)
+    }
+
+    @Test fun aSuccessfulEndMustAccountForAll360Notes() = runBlocking {
+        val song = script.copy(events = (0 until 360).map {
+            ScriptEvent(it * 500L, 160L, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 360, 1.0)
+        val result = PlaybackRunner().run(plan, {}, {}, { true }, { _, _ -> error("continuous only") }, {},
+            dryRunCompleted = true, warningsConfirmed = true,
+            dispatchContinuous = { onNote, _, _, _ ->
+                repeat(342) { onNote(it, null, null) }
+                ContinuousPlaybackResult(342, TapResult.Completed)
+            })
+
+        assertEquals(342, result.completed)
+        assertEquals(18, result.remaining)
+        assertFalse(result.stopped)
+        assertNotNull(result.failure)
+    }
+
+    @Test fun focusLossAfterTheFinalEndDoesNotFailAFullSequence() = runBlocking {
+        val plan = PlaybackPlanner.plan(script, layout, Region.NATURAL, false, 0, 8, 1.0)
+        var focused = true
+        val result = PlaybackRunner().run(plan, {}, {}, { focused }, { _, _ -> error("continuous only") }, {},
+            dryRunCompleted = true, warningsConfirmed = true,
+            dispatchContinuous = { onNote, _, _, _ ->
+                repeat(8) { onNote(it, null, null) }
+                focused = false
+                ContinuousPlaybackResult(8, TapResult.Completed)
+            })
+
+        assertEquals(8, result.completed)
+        assertFalse(result.stopped)
+        assertNull(result.failure)
+    }
+
+    @Test fun unknownCancellationAfterNote342IsNotRecordedAsUserStop() = runBlocking {
+        val song = script.copy(events = (0 until 360).map {
+            ScriptEvent(it * 500L, 160L, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 360, 1.0)
+        val runner = PlaybackRunner()
+        val result = runner.run(plan, {}, {}, { true }, { _, _ -> error("continuous only") }, { runner.requestStop() },
+            dryRunCompleted = true, warningsConfirmed = true,
+            dispatchContinuous = { onNote, _, _, _ ->
+                repeat(342) { onNote(it, null, null) }
+                ContinuousPlaybackResult(342, TapResult.Cancelled)
+            })
+
+        assertEquals(342, result.completed)
+        assertEquals(18, result.remaining)
+        assertEquals(RootSequenceTermination.UNKNOWN_CANCELLATION, result.rootTermination)
+        assertFalse(result.stopped)
+        assertNotNull(result.failure)
+    }
+
+    @Test fun dispatcherFailureKeepsItsCauseWhenAStopIsAlsoRequested() = runBlocking {
+        val plan = PlaybackPlanner.plan(script, layout, Region.NATURAL, false, 0, 8, 1.0)
+        val runner = PlaybackRunner()
+        val result = runner.run(plan, {}, {}, { true }, { _, _ -> error("continuous only") }, {},
+            dryRunCompleted = true, warningsConfirmed = true,
+            dispatchContinuous = { onNote, _, _, _ ->
+                onNote(0, null, null)
+                runner.requestStop()
+                ContinuousPlaybackResult(1, TapResult.Unavailable("dispatcher unavailable"),
+                    rootTermination = RootSequenceTermination.DISPATCHER_FAILED)
+            })
+
+        assertEquals(1, result.completed)
+        assertEquals(RootSequenceTermination.DISPATCHER_FAILED, result.rootTermination)
+        assertFalse(result.stopped)
+        assertNotNull(result.failure)
+    }
+
+    @Test fun anEnvironmentStopIsNotReclassifiedByALaterUserStop() = runBlocking {
+        val plan = PlaybackPlanner.plan(script, layout, Region.NATURAL, false, 0, 8, 1.0)
+        val runner = PlaybackRunner()
+        val result = runner.run(plan, {}, {}, { true }, { _, _ -> error("continuous only") }, {},
+            dryRunCompleted = true, warningsConfirmed = true,
+            dispatchContinuous = { onNote, _, _, _ ->
+                onNote(0, null, null)
+                runner.requestStop(PlaybackStopOrigin.ENVIRONMENT_CHANGED)
+                runner.requestStop()
+                ContinuousPlaybackResult(1, TapResult.Cancelled, rootTermination = RootSequenceTermination.STOP_CONFIRMED)
+            })
+
+        assertEquals(PlaybackStopOrigin.ENVIRONMENT_CHANGED, runner.stopOrigin)
+        assertFalse(result.stopped)
+        assertNotNull(result.failure)
     }
 
 }

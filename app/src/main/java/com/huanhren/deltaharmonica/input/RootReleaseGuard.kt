@@ -7,6 +7,7 @@ internal data class RootReleaseRecord(
     val sessionId: String?,
     val helper: RootHelperIdentity?,
     val createdAtMs: Long? = null,
+    val dispatcherId: String? = null,
 )
 
 internal interface RootReleaseJournal {
@@ -29,21 +30,24 @@ internal class RootReleaseGuard(context: Context) : RootReleaseJournal {
         val session = values[SESSION] as? String ?: return invalidRecord
         val pid = (values[PID] as? Int)?.takeIf { it > 1 } ?: return RootReleaseRecord(session, null)
         val start = (values[START] as? Long)?.takeIf { it > 0 } ?: return RootReleaseRecord(session, null)
-        return RootReleaseRecord(session, RootHelperIdentity(pid, start), values[CREATED] as? Long)
+        return RootReleaseRecord(session, RootHelperIdentity(pid, start), values[CREATED] as? Long, values[DISPATCHER] as? String)
     }
 
     override fun begin(record: RootReleaseRecord): Boolean {
         val helper = record.helper ?: return false
+        if (pending() != null) return false
         return preferences.edit().putInt(BOOT, boot).putString(SESSION, record.sessionId)
             .putInt(PID, helper.pid).putLong(START, helper.startTicks)
             .putLong(CREATED, record.createdAtMs ?: 0)
+            .putString(DISPATCHER, record.dispatcherId)
             .commit()
     }
 
     override fun confirm(record: RootReleaseRecord): Boolean {
         val current = pending()
         if (current != null && current != record) return false
-        return preferences.edit().remove(BOOT).remove(SESSION).remove(PID).remove(START).remove(CREATED).commit()
+        return preferences.edit().remove(BOOT).remove(SESSION).remove(PID).remove(START).remove(CREATED)
+            .remove(DISPATCHER).commit()
     }
 
     private companion object {
@@ -52,6 +56,7 @@ internal class RootReleaseGuard(context: Context) : RootReleaseJournal {
         const val PID = "helper_pid"
         const val START = "helper_start_ticks"
         const val CREATED = "session_created_ms"
+        const val DISPATCHER = "dispatcher_id"
         val invalidRecord = RootReleaseRecord("", null)
     }
 }

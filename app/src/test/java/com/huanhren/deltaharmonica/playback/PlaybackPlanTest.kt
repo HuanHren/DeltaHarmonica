@@ -36,6 +36,20 @@ class PlaybackPlanTest {
         assertEquals(0, plan.shortenedNotes)
     }
 
+    @Test fun rootScalesNoteOffOnTheSameClockAsNoteOn() {
+        val song = script().copy(events = listOf(0L to 92L, 201L to 101L, 521L to 101L).map { (start, hold) ->
+            ScriptEvent(start, hold, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 3, 2.0,
+            rootTiming = RootPlaybackTiming())
+
+        assertTrue(plan.fatalErrors.toString(), plan.fatalErrors.isEmpty())
+        assertEquals(listOf(0L, 101L, 261L), plan.events.map { it.predictedStartMs })
+        assertEquals(listOf(46L, 151L, 311L), plan.events.map { it.predictedEndMs })
+        assertEquals(311L, plan.estimatedTotalMs)
+        assertEquals(0, plan.shortenedNotes)
+    }
+
     @Test fun rootShortensSustainsToKeepTheBeatButReportsUnavoidableDelay() {
         val timing = RootPlaybackTiming()
         val song = script().copy(events = listOf(0L to 100L, 100L to 50L, 150L to 100L, 500L to 100L).map { (start, hold) ->
@@ -68,6 +82,13 @@ class PlaybackPlanTest {
         assertEquals(2, plan.extendedNotes)
         assertEquals(1, plan.shortenedNotes)
         assertEquals(listOf(146L, 45L, 45L, 200L), plan.events.map { it.predictedEndMs - it.predictedStartMs })
+        assertEquals(listOf(
+            RootTimingConflict(1, 20, 45, RootTimingConflict.Constraint.NOTE_HOLD),
+            RootTimingConflict(2, 20, 45, RootTimingConflict.Constraint.NOTE_HOLD),
+            RootTimingConflict(2, 32, 99, RootTimingConflict.Constraint.TRANSITION, repeatedKey = true),
+            RootTimingConflict(3, 38, 259, RootTimingConflict.Constraint.TRANSITION,
+                repeatedKey = true, controlSetupMs = 184),
+        ), plan.rootTimingConflicts)
         assertTrue(plan.warnings.toString(), plan.warnings.any { it.contains("3 个音符短于") })
         assertTrue(plan.warnings.toString(), plan.warnings.any {
             it.contains("同键 2") && it.contains("控制切换 1") &&

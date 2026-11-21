@@ -4,6 +4,10 @@ internal enum class RootSessionPhase {
     IDLE, PREPARING, ACTIVE, CLEANING, RECOVERY_REQUIRED, RECOVERING,
 }
 
+internal enum class RootPlaybackLockState {
+    LOCK_FREE, LOCK_HELD, LOCK_STALE, LOCK_RECOVERY_REQUIRED, LOCK_RELEASE_UNCONFIRMED,
+}
+
 internal data class RootSessionState(
     val id: String? = null,
     val phase: RootSessionPhase = RootSessionPhase.IDLE,
@@ -11,6 +15,14 @@ internal data class RootSessionState(
     val helper: RootHelperIdentity? = null,
     val changedAtMs: Long = System.currentTimeMillis(),
     val recoveryAttempts: Int = 0,
+    val dispatcherId: String? = null,
+    val dispatcherStatus: String? = null,
+    val activeTouchCount: Int? = null,
+    val lockState: RootPlaybackLockState = RootPlaybackLockState.LOCK_FREE,
+    val terminationReason: String? = null,
+    val lastFailureReason: String? = null,
+    val cleanup: RootCleanup? = null,
+    val recoveryResult: RootRecoveryResult? = null,
 ) {
     val recoveryRequired: Boolean
         get() = phase == RootSessionPhase.RECOVERY_REQUIRED || phase == RootSessionPhase.RECOVERING
@@ -18,7 +30,11 @@ internal data class RootSessionState(
     fun diagnosticLine(): String =
         "session=${id ?: "legacy"} phase=$phase helperPid=${helper?.pid}" +
             " helperStartTicks=${helper?.startTicks} timestampMs=$changedAtMs" +
-            " recoveryAttempts=$recoveryAttempts detail=${detail ?: "-"}"
+            " dispatcher=${dispatcherId ?: "-"} dispatcherState=${dispatcherStatus ?: "-"}" +
+            " lock=$lockState activeTouches=${activeTouchCount ?: "unknown"}" +
+            " stop=${terminationReason ?: "-"} cleanup=${cleanup ?: "-"}" +
+            " lastFailure=${lastFailureReason ?: "-"}" +
+            " recoveryAttempts=$recoveryAttempts recovery=${recoveryResult ?: "-"} detail=${detail ?: "-"}"
 }
 
 /** Keeps transition and summary data available even after logcat rolls over. */

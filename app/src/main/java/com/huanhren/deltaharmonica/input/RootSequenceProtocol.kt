@@ -3,10 +3,16 @@ package com.huanhren.deltaharmonica.input
 import java.util.UUID
 
 internal data class RootHelperIdentity(val pid: Int, val startTicks: Long)
+internal data class RootProtocolFrame(val sessionId: String, val dispatcherId: String, val operation: Long, val payload: String)
+internal enum class RootDispatcherStatus { STARTING, READY, RUNNING, STOPPING, TERMINATED, UNRESPONSIVE }
+internal enum class RootDispatcherFault {
+    PEER_EXITED, PIPE_FAILED, PROTOCOL_ERROR, HEARTBEAT_TIMEOUT, RECEIPT_TIMEOUT, NATIVE_TIMEOUT, STOP_TIMEOUT,
+    WORKER_FAILED, RELEASE_UNCONFIRMED,
+}
 
 /** Private, versioned text framing shared by the app and the helper from the same APK. */
 internal object RootSequenceProtocol {
-    const val VERSION = 3
+    const val VERSION = 4
     const val MAX_NOTES = 100_000
     const val CHUNK_SIZE = 32
     const val BUFFER_SIZE = 256
@@ -17,11 +23,21 @@ internal object RootSequenceProtocol {
     fun validSessionId(sessionId: String): Boolean =
         runCatching { UUID.fromString(sessionId).toString() == sessionId }.getOrDefault(false)
 
-    fun decodeReady(reply: String, sessionId: String): RootHelperIdentity? {
+    fun encodeFrame(sessionId: String, dispatcherId: String, operation: Long, payload: String): String =
+        "DELTA $sessionId $dispatcherId $operation $payload"
+
+    fun decodeFrame(line: String, sessionId: String): RootProtocolFrame? {
+        val fields = line.split(' ', limit = 5)
+        if (fields.size != 5 || fields[0] != "DELTA" || fields[1] != sessionId || fields[4].isEmpty()) return null
+        val operation = fields[3].toLongOrNull()?.takeIf { it >= 0 } ?: return null
+        return RootProtocolFrame(sessionId, fields[2], operation, fields[4])
+    }
+
+    fun decodeReady(reply: String): RootHelperIdentity? {
         val fields = reply.split(' ')
-        if (fields.size != 5 || fields[0] != "READY" || fields[1] != VERSION.toString() || fields[2] != sessionId) return null
-        val pid = fields[3].toIntOrNull()?.takeIf { it > 1 } ?: return null
-        val startTicks = fields[4].toLongOrNull()?.takeIf { it > 0 } ?: return null
+        if (fields.size != 4 || fields[0] != "READY" || fields[1] != VERSION.toString()) return null
+        val pid = fields[2].toIntOrNull()?.takeIf { it > 1 } ?: return null
+        val startTicks = fields[3].toLongOrNull()?.takeIf { it > 0 } ?: return null
         return RootHelperIdentity(pid, startTicks)
     }
 

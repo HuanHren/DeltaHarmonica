@@ -28,6 +28,8 @@ object PlaybackPreparation {
     internal class Session internal constructor(val cancelStart: () -> Unit) {
         var runner: PlaybackRunner? = null
             internal set
+        var pendingStopOrigin: PlaybackStopOrigin? = null
+            internal set
     }
 
     var pending: PreparedPlayback? = null
@@ -63,7 +65,8 @@ object PlaybackPreparation {
         return true
     }
 
-    internal fun stopPlayback(owner: Session): Boolean = owns(owner) && stopPlayback()
+    internal fun stopPlayback(owner: Session, origin: PlaybackStopOrigin = PlaybackStopOrigin.USER_STOP): Boolean =
+        owns(owner) && stopPlayback(origin)
 
     fun togglePause(): Boolean {
         val runner = activeRunner ?: return false
@@ -90,11 +93,12 @@ object PlaybackPreparation {
         actualTimings[index] = timing
     }
 
-    fun stopPlayback(): Boolean {
+    fun stopPlayback(): Boolean = stopPlayback(PlaybackStopOrigin.USER_STOP)
+
+    internal fun stopPlayback(origin: PlaybackStopOrigin): Boolean {
         val current = progress.value
-        val runner = activeRunner
-        val cancel = cancelPendingStart
-        if (runner == null && cancel == null) {
+        val owner = session
+        if (owner == null) {
             if (current.phase != PlaybackStatus.WAITING_FOR_GAME || pending == null) return false
             pending = null
             progress.value = current.copy(state = "已取消等待", phase = PlaybackStatus.COMPLETED, stopped = true)
@@ -102,7 +106,13 @@ object PlaybackPreparation {
         }
         if (current.phase == PlaybackStatus.STOPPING) return true
         progress.value = current.copy(state = "正在停止，等待释放", phase = PlaybackStatus.STOPPING)
-        if (runner != null) runner.requestStop() else cancel?.invoke()
+        val runner = owner.runner
+        if (runner != null) {
+            runner.requestStop(origin)
+        } else {
+            owner.pendingStopOrigin = origin
+            owner.cancelStart()
+        }
         return true
     }
     /** A different score or plan must never inherit another session's measurements. */
