@@ -67,8 +67,14 @@ class SuCommandRunner(
             RootCommandResult.Failure("读取 su 结果失败：${e.localizedMessage}")
         } finally {
             if (!output.isCompleted || process.isAlive) {
-                runCatching { process.destroyForcibly() }
+                process.requestTermination()
             }
         }
     }
+}
+
+/** A process wrapper may wait for a locked or inherited pipe while tearing down its streams. */
+internal fun Process.requestTermination() {
+    Thread({ runCatching(::destroyForcibly) }, "DeltaRootProcessCleanup")
+        .apply { isDaemon = true; start() }
 }

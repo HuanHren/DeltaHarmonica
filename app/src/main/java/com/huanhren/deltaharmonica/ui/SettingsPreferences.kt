@@ -2,6 +2,8 @@ package com.huanhren.deltaharmonica.ui
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
@@ -42,7 +44,11 @@ import com.huanhren.deltaharmonica.R
 import com.huanhren.deltaharmonica.input.BackendAvailability
 import com.huanhren.deltaharmonica.input.BackendStatus
 import com.huanhren.deltaharmonica.input.RootAuthorizationState
+import com.huanhren.deltaharmonica.input.RootCleanup
 import com.huanhren.deltaharmonica.input.RootInputReadiness
+import com.huanhren.deltaharmonica.input.RootPlaybackLockState
+import com.huanhren.deltaharmonica.input.RootRecoveryResult
+import com.huanhren.deltaharmonica.input.RootSessionPhase
 import com.huanhren.deltaharmonica.playback.PlaybackPreparation
 import com.huanhren.deltaharmonica.ui.theme.*
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -163,7 +169,9 @@ internal fun SystemPreferences(state: AppUiState, model: AppViewModel, onAppeara
 
 @Composable
 private fun RootAuthorizationPreferences(state: AppUiState, model: AppViewModel, idle: Boolean) {
+    val context = LocalContext.current
     val root by model.rootAuthorization.collectAsStateWithLifecycle()
+    val session by model.rootSession.collectAsStateWithLifecycle()
     val readyBackend = state.selectedBackend.takeIf { state.selectedBackendStatus?.available == true }
     val canChange = idle && !state.checkingRoot
     PreferenceGroup(R.string.root_preferences) {
@@ -181,7 +189,7 @@ private fun RootAuthorizationPreferences(state: AppUiState, model: AppViewModel,
         )
         BasicComponent(
             title = stringResource(R.string.root_authorization),
-            summary = stringResource(if (state.checkingRoot) R.string.root_checking else when (root.authorization) {
+            summary = stringResource(if (root.checking) R.string.root_checking else when (root.authorization) {
                 RootAuthorizationState.UNKNOWN -> R.string.root_state_unknown
                 RootAuthorizationState.NOT_ROOTED -> R.string.root_environment_not_found
                 RootAuthorizationState.NOT_AUTHORIZED -> R.string.root_state_not_authorized
@@ -202,6 +210,64 @@ private fun RootAuthorizationPreferences(state: AppUiState, model: AppViewModel,
                 RootInputReadiness.UNAVAILABLE -> R.string.root_input_unavailable
             }),
         )
+        BasicComponent(
+            title = stringResource(R.string.root_session_status),
+            summary = stringResource(when (session.phase) {
+                RootSessionPhase.IDLE -> R.string.root_session_idle
+                RootSessionPhase.PREPARING -> R.string.root_session_preparing
+                RootSessionPhase.ACTIVE -> R.string.root_session_active
+                RootSessionPhase.CLEANING -> R.string.root_session_cleaning
+                RootSessionPhase.RECOVERY_REQUIRED -> R.string.root_session_recovery_required
+                RootSessionPhase.RECOVERING -> R.string.root_session_recovering
+            }),
+        )
+        val none = stringResource(R.string.root_session_none)
+        val unconfirmed = stringResource(R.string.root_session_unconfirmed)
+        BasicComponent(title = stringResource(R.string.root_session_id), summary = session.id ?: none)
+        val helperStatus = stringResource(when (session.phase) {
+            RootSessionPhase.IDLE -> R.string.root_helper_inactive
+            RootSessionPhase.PREPARING -> R.string.root_helper_starting
+            RootSessionPhase.ACTIVE -> R.string.root_helper_connected
+            RootSessionPhase.CLEANING -> R.string.root_helper_closing
+            RootSessionPhase.RECOVERING -> R.string.root_helper_verifying
+            RootSessionPhase.RECOVERY_REQUIRED -> if (session.recoveryResult == RootRecoveryResult.HELPER_ALIVE) {
+                R.string.root_helper_observed_alive
+            } else {
+                R.string.root_session_unconfirmed
+            }
+        })
+        BasicComponent(title = stringResource(R.string.root_session_helper), summary = session.helper?.let {
+            stringResource(R.string.root_helper_status_pid, helperStatus, it.pid)
+        } ?: helperStatus)
+        val dispatcherStatus = session.dispatcherStatus ?: none
+        BasicComponent(title = stringResource(R.string.root_session_dispatcher), summary = session.dispatcherId?.let {
+            stringResource(R.string.root_dispatcher_status_id, dispatcherStatus, it)
+        } ?: dispatcherStatus)
+        BasicComponent(title = stringResource(R.string.root_session_lock), summary = stringResource(when (session.lockState) {
+            RootPlaybackLockState.LOCK_FREE -> R.string.root_lock_free
+            RootPlaybackLockState.LOCK_HELD -> R.string.root_lock_held
+            RootPlaybackLockState.LOCK_STALE -> R.string.root_lock_stale
+            RootPlaybackLockState.LOCK_RECOVERY_REQUIRED -> R.string.root_session_recovery_required
+            RootPlaybackLockState.LOCK_RELEASE_UNCONFIRMED -> R.string.root_lock_release_unconfirmed
+        }))
+        BasicComponent(title = stringResource(R.string.root_session_touches),
+            summary = session.activeTouchCount?.toString() ?: unconfirmed)
+        BasicComponent(title = stringResource(R.string.root_session_cleanup), summary = stringResource(when (session.cleanup) {
+            RootCleanup.ACKNOWLEDGED -> R.string.root_cleanup_acknowledged
+            RootCleanup.OBSERVED_IDLE -> R.string.root_cleanup_observed_idle
+            RootCleanup.REJECTED -> R.string.root_cleanup_rejected
+            RootCleanup.NO_ACK -> R.string.root_cleanup_no_ack
+            RootCleanup.JOURNAL_FAILURE -> R.string.root_cleanup_journal_failure
+            null -> R.string.root_session_none
+        }))
+        session.terminationReason?.let { BasicComponent(title = stringResource(R.string.root_session_termination), summary = it) }
+        session.lastFailureReason?.let { BasicComponent(title = stringResource(R.string.root_session_last_failure), summary = it) }
+        BasicComponent(title = stringResource(R.string.root_session_recovery_result), summary = session.recoveryResult?.name ?: none)
+        session.detail?.let { BasicComponent(title = stringResource(R.string.root_session_detail), summary = it) }
+        if (session.recoveryAttempts > 0) BasicComponent(
+            title = stringResource(R.string.root_session_recovery_attempts),
+            summary = session.recoveryAttempts.toString(),
+        )
         BasicComponent(title = stringResource(R.string.root_current_backend), summary =
             if (readyBackend != null) backendLabel(readyBackend) else stringResource(R.string.root_no_usable_backend))
         ArrowPreference(
@@ -213,6 +279,21 @@ private fun RootAuthorizationPreferences(state: AppUiState, model: AppViewModel,
             title = stringResource(R.string.root_request_authorization),
             enabled = canChange,
             onClick = model::checkRoot,
+        )
+        ArrowPreference(
+            title = stringResource(R.string.root_recover_input),
+            enabled = canChange && (session.phase == RootSessionPhase.IDLE || session.phase == RootSessionPhase.RECOVERY_REQUIRED),
+            onClick = model::recoverRootInput,
+        )
+        val copyDiagnosticsLabel = stringResource(R.string.root_copy_diagnostics)
+        ArrowPreference(
+            title = copyDiagnosticsLabel,
+            enabled = session.id != null || session.recoveryRequired,
+            onClick = {
+                context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                    ClipData.newPlainText(copyDiagnosticsLabel, model.rootDiagnosticReport()),
+                )
+            },
         )
         OverlayDropdownPreference(
             listOf(backendLabel("Root"), backendLabel("Accessibility")),

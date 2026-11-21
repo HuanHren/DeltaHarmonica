@@ -12,6 +12,7 @@ import com.huanhren.deltaharmonica.model.ScreenPoint
 import com.huanhren.deltaharmonica.playback.CombinedGesture
 import com.huanhren.deltaharmonica.playback.PlaybackPreparation
 import com.huanhren.deltaharmonica.playback.PlaybackInput
+import com.huanhren.deltaharmonica.playback.PlaybackStopOrigin
 import com.huanhren.deltaharmonica.DeltaHarmonicaApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,7 +44,10 @@ object AccessibilityConnection {
 }
 
 class TouchAccessibilityService : AccessibilityService() {
-    private val gestureGate = NoteActionGate()
+    private val gestureGate = NoteActionGate {
+        val root = (application as DeltaHarmonicaApp).rootBackend
+        if (root.releaseUncertain) root.status().message else null
+    }
     private val stopKey = PlaybackKeyPress()
     private val pauseKey = PlaybackKeyPress()
 
@@ -62,7 +66,7 @@ class TouchAccessibilityService : AccessibilityService() {
         return when (event.action) {
             KeyEvent.ACTION_DOWN -> key.down(event.deviceId, event.downTime, repeated = event.repeatCount > 0) {
                 val preferences = (application as DeltaHarmonicaApp).preferences
-                if (key === stopKey) preferences.volumeStop.value && PlaybackPreparation.stopPlayback()
+                if (key === stopKey) preferences.volumeStop.value && PlaybackPreparation.stopPlayback(PlaybackStopOrigin.VOLUME_KEY)
                 else preferences.volumePause.value &&
                     PlaybackPreparation.activeInput == PlaybackInput.ACCESSIBILITY &&
                     focusedPackage() == FocusedWindow.GAME_PACKAGE &&

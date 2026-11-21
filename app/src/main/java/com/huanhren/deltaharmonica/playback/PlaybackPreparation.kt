@@ -24,14 +24,50 @@ data class ActualTiming(val dispatchMs: Long, val callbackMs: Long?, val noteOff
     val callbackLatencyMs: Long? get() = callbackMs?.minus(dispatchMs)
 }
 object PlaybackPreparation {
+    /** Ownership of the arming coroutine and, after handoff, its playback runner. Main thread only. */
+    internal class Session internal constructor(val cancelStart: () -> Unit) {
+        var runner: PlaybackRunner? = null
+            internal set
+        var pendingStopOrigin: PlaybackStopOrigin? = null
+            internal set
+    }
+
     var pending: PreparedPlayback? = null
-    var activeRunner: PlaybackRunner? = null
+    private var session: Session? = null
+    val activeRunner: PlaybackRunner? get() = session?.runner
+    val cancelPendingStart: (() -> Unit)? get() = session?.takeIf { it.runner == null }?.cancelStart
     internal var activeInput: PlaybackInput? = null
-    var cancelPendingStart: (() -> Unit)? = null
+    internal var confirmResume: (() -> Boolean)? = null
     var controlsConfirmed = false
     val progress = MutableStateFlow(PlaybackProgress())
     val runtimeState = MutableStateFlow(InstrumentRuntimeState())
     val actualTimings = mutableMapOf<Int, ActualTiming>()
+
+    internal fun beginSession(cancelStart: () -> Unit): Session? {
+        if (session != null) return null
+        return Session(cancelStart).also { session = it }
+    }
+
+    internal fun owns(owner: Session): Boolean = session === owner
+
+    internal fun attachRunner(owner: Session, runner: PlaybackRunner): Boolean {
+        if (!owns(owner) || owner.runner != null || progress.value.phase == PlaybackStatus.STOPPING) return false
+        owner.runner = runner
+        return true
+    }
+
+    internal fun finishSession(owner: Session, terminal: PlaybackProgress): Boolean {
+        if (!owns(owner)) return false
+        session = null
+        activeInput = null
+        confirmResume = null
+        progress.value = terminal
+        return true
+    }
+
+    internal fun stopPlayback(owner: Session, origin: PlaybackStopOrigin = PlaybackStopOrigin.USER_STOP): Boolean =
+        owns(owner) && stopPlayback(origin)
+
     fun togglePause(): Boolean {
         val runner = activeRunner ?: return false
         val current = progress.value
@@ -40,17 +76,29 @@ object PlaybackPreparation {
                 runner.requestPause()
                 progress.value = current.copy(state = "等待当前音符释放", phase = PlaybackStatus.PAUSING)
             }
-            PlaybackStatus.PAUSED -> runner.requestResume()
+            PlaybackStatus.PAUSED -> {
+                if (!runner.pauseRequested) return false
+                if (confirmResume?.invoke() == false) return false
+                runner.requestResume()
+            }
             else -> return false
         }
         return true
     }
 
-    fun stopPlayback(): Boolean {
+    internal fun recordTiming(index: Int, timing: ActualTiming) {
+        if (actualTimings.size >= 1_024 && index !in actualTimings) {
+            actualTimings.remove(actualTimings.keys.first())
+        }
+        actualTimings[index] = timing
+    }
+
+    fun stopPlayback(): Boolean = stopPlayback(PlaybackStopOrigin.USER_STOP)
+
+    internal fun stopPlayback(origin: PlaybackStopOrigin): Boolean {
         val current = progress.value
-        val runner = activeRunner
-        val cancel = cancelPendingStart
-        if (runner == null && cancel == null) {
+        val owner = session
+        if (owner == null) {
             if (current.phase != PlaybackStatus.WAITING_FOR_GAME || pending == null) return false
             pending = null
             progress.value = current.copy(state = "已取消等待", phase = PlaybackStatus.COMPLETED, stopped = true)
@@ -58,7 +106,13 @@ object PlaybackPreparation {
         }
         if (current.phase == PlaybackStatus.STOPPING) return true
         progress.value = current.copy(state = "正在停止，等待释放", phase = PlaybackStatus.STOPPING)
-        if (runner != null) runner.requestStop() else cancel?.invoke()
+        val runner = owner.runner
+        if (runner != null) {
+            runner.requestStop(origin)
+        } else {
+            owner.pendingStopOrigin = origin
+            owner.cancelStart()
+        }
         return true
     }
     /** A different score or plan must never inherit another session's measurements. */

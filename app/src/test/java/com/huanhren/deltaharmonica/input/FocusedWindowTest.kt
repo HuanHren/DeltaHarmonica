@@ -18,6 +18,48 @@ class FocusedWindowTest {
         assertFalse(FocusedWindow.isFreshGame("com.other",1000,1100))
         assertFalse(FocusedWindow.isFreshGame(null,1000,1100))
     }
+
+    @Test fun missingProbeKeepsOriginalObservationButAnExplicitFocusLossStopsImmediately() {
+        val game = FocusedWindow.parseProbe("mCurrentFocus=Window{abc u0 com.tencent.tmgp.dfm/.GameActivity}")
+        val starting = FocusedWindow.Observation().updateRoot(game, 1000)
+        val missing = starting.updateRoot(FocusedWindow.parseProbe("unexpected reply"), 1200)
+        assertSame(starting, missing)
+        assertTrue(missing.freshGame(1400))
+        assertFalse(missing.freshGame(1601))
+        val lost = missing.updateRoot(FocusedWindow.parseProbe("mCurrentFocus=null"), 1400)
+        assertFalse(lost.freshGame(1400))
+        assertNull(lost.window)
+    }
+
+    @Test fun timingOutAReadOnlyFocusProbeDoesNotDiscardRootAuthorization() = runBlocking {
+        val backend = RootBackend(RootCommandRunner { command, _ ->
+            if (command == "id -u") RootCommandResult.Success("0") else RootCommandResult.TimedOut
+        }) { ScreenSize(2670, 1200) }
+        assertTrue(backend.checkAccess().available)
+        assertNull(backend.observeFocusedWindow())
+        assertTrue(backend.status().available)
+    }
+
+    @Test fun samePackageWindowsHaveDifferentIdentities() {
+        val first = "  mCurrentFocus=Window{abc u0 com.tencent.tmgp.dfm/.GameActivity}"
+        val second = "  mCurrentFocus=Window{def u0 com.tencent.tmgp.dfm/.GameActivity}"
+        val observed = FocusedWindow.parseIdentity(first)
+        assertEquals(FocusedWindow.Identity("com.tencent.tmgp.dfm", "abc", 0), observed)
+        assertNotEquals(observed, FocusedWindow.parseIdentity(second))
+        assertNull(FocusedWindow.parseIdentity("$first\n$second"))
+        assertEquals(observed, FocusedWindow.parseIdentity("$first\nmCurrentFocus=null"))
+    }
+
+    @Test fun aTitleOnlySystemWindowImmediatelyInvalidatesCachedGameFocus() {
+        val game = "mCurrentFocus=Window{abc u0 com.tencent.tmgp.dfm/.GameActivity}"
+        val shade = "mCurrentFocus=Window{32f73df u0 NotificationShade}"
+        val starting = FocusedWindow.Observation().updateRoot(FocusedWindow.parseProbe(game), 1000)
+        for (sample in listOf(shade, "$game\n$shade")) {
+            val observed = starting.updateRoot(FocusedWindow.parseProbe(sample), 1010)
+            assertFalse(observed.freshGame(1010))
+            assertNull(observed.window)
+        }
+    }
     @Test fun rootFocusQueryIsReadOnlyAndRequiresAuthorization() = runBlocking {
         val commands=mutableListOf<String>()
         val runner=RootCommandRunner { command,_ ->

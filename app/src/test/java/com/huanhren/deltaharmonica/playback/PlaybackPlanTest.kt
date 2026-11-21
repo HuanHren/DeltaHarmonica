@@ -6,6 +6,95 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PlaybackPlanTest {
+    @Test fun rootRejectsExtremeStretchDuringPreflight() {
+        val song = script().copy(events = List(100) { index ->
+            ScriptEvent(index.toLong(), 1L, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 100, 2.0, rootTiming = RootPlaybackTiming())
+        assertEquals(100, plan.events.size)
+        assertTrue(plan.fatalErrors.any { it.contains("降低倍速") })
+    }
+    @Test fun rootSchedulesRegionThenSemitoneBeforeFirstNote() {
+        val timing = RootPlaybackTiming()
+        val plan = PlaybackPlanner.plan(script(), layout, Region.LOW, true, 0, 8, 1.0, rootTiming = timing)
+        assertTrue(plan.fatalErrors.isEmpty())
+        assertEquals(2 * timing.controlSlotMs, plan.events.first().predictedStartMs)
+        assertEquals(1, plan.regionSwitches)
+        assertEquals(1, plan.semitoneSwitches)
+        assertTrue(plan.events.drop(1).none { it.regionSwitch || it.semitoneSwitch })
+    }
+
+    @Test fun rootUsesInitialControlTimeAsPreRollWithoutCompressingTheFirstBeat() {
+        val timing = RootPlaybackTiming()
+        val song = script().copy(events = listOf(0L, 330L).map {
+            ScriptEvent(it, 95L, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.LOW, true, 0, 2, 1.0, rootTiming = timing)
+        val preRoll = 2 * timing.controlSlotMs
+        assertEquals(preRoll, plan.rootPreRollMs)
+        assertEquals(listOf(preRoll, preRoll + 330L), plan.events.map { it.predictedStartMs })
+        assertEquals(0, plan.shortenedNotes)
+    }
+
+    @Test fun rootScalesNoteOffOnTheSameClockAsNoteOn() {
+        val song = script().copy(events = listOf(0L to 92L, 201L to 101L, 521L to 101L).map { (start, hold) ->
+            ScriptEvent(start, hold, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 3, 2.0,
+            rootTiming = RootPlaybackTiming())
+
+        assertTrue(plan.fatalErrors.toString(), plan.fatalErrors.isEmpty())
+        assertEquals(listOf(0L, 101L, 261L), plan.events.map { it.predictedStartMs })
+        assertEquals(listOf(46L, 151L, 311L), plan.events.map { it.predictedEndMs })
+        assertEquals(311L, plan.estimatedTotalMs)
+        assertEquals(0, plan.shortenedNotes)
+    }
+
+    @Test fun rootShortensSustainsToKeepTheBeatButReportsUnavoidableDelay() {
+        val timing = RootPlaybackTiming()
+        val song = script().copy(events = listOf(0L to 100L, 100L to 50L, 150L to 100L, 500L to 100L).map { (start, hold) ->
+            ScriptEvent(start, hold, 62, "NOTE_2", Region.NATURAL, false)
+        })
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 4, 1.0, rootTiming = timing)
+        assertTrue(plan.fatalErrors.joinToString(), plan.fatalErrors.isEmpty())
+        assertEquals(0L, plan.events[0].predictedStartMs)
+        val gap = timing.plannedGap(sameKey = true, setupMs = 0L)
+        assertEquals(100L - gap, plan.events[0].predictedEndMs)
+        assertEquals(100L, plan.events[1].predictedStartMs)
+        assertEquals(100L + timing.minNoteHoldMs + gap, plan.events[2].predictedStartMs)
+        assertEquals(500L, plan.events[3].predictedStartMs)
+        assertEquals(2, plan.shortenedNotes)
+        assertTrue(plan.warnings.any { it.contains("时间预算不足") })
+    }
+
+    @Test fun rootReportsShortnessAfterClippingAndShowsTheConstrainedTransition() {
+        val timing = RootPlaybackTiming()
+        val song = script().copy(events = listOf(
+            ScriptEvent(0, 200, 62, "NOTE_2", Region.NATURAL, false),
+            ScriptEvent(200, 20, 62, "NOTE_2", Region.NATURAL, false),
+            ScriptEvent(232, 20, 62, "NOTE_2", Region.NATURAL, false),
+            ScriptEvent(270, 200, 75, "NOTE_2", Region.HIGH, true),
+        ))
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 4, 1.0, rootTiming = timing)
+
+        assertTrue(plan.fatalErrors.toString(), plan.fatalErrors.isEmpty())
+        assertEquals(listOf(62, 62, 62, 75), plan.events.map { it.event.midiNote })
+        assertEquals(2, plan.extendedNotes)
+        assertEquals(1, plan.shortenedNotes)
+        assertEquals(listOf(146L, 45L, 45L, 200L), plan.events.map { it.predictedEndMs - it.predictedStartMs })
+        assertEquals(listOf(
+            RootTimingConflict(1, 20, 45, RootTimingConflict.Constraint.NOTE_HOLD),
+            RootTimingConflict(2, 20, 45, RootTimingConflict.Constraint.NOTE_HOLD),
+            RootTimingConflict(2, 32, 99, RootTimingConflict.Constraint.TRANSITION, repeatedKey = true),
+            RootTimingConflict(3, 38, 259, RootTimingConflict.Constraint.TRANSITION,
+                repeatedKey = true, controlSetupMs = 184),
+        ), plan.rootTimingConflicts)
+        assertTrue(plan.warnings.toString(), plan.warnings.any { it.contains("3 个音符短于") })
+        assertTrue(plan.warnings.toString(), plan.warnings.any {
+            it.contains("同键 2") && it.contains("控制切换 1") &&
+                it.contains("第 4 个音符") && it.contains("38 ms") && it.contains("259 ms")
+        })
+    }
     @Test fun gestureOverheadIsBudgetedOnlyWhenTheOriginalTimelineHasNoRoom() {
         val dense = script().copy(events=(0..2).map { ScriptEvent(it*100L,100,62,"NOTE_2",Region.NATURAL,false) })
         val plan=PlaybackPlanner.plan(dense,layout,Region.NATURAL,false,0,3,1.0,gestureOverheadMs=30)

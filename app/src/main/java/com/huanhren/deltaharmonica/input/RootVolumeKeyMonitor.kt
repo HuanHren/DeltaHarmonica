@@ -1,8 +1,25 @@
 package com.huanhren.deltaharmonica.input
 
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+
 /** Observes volume-down presses from built-in key drivers while a Root playback session is open. */
-internal class RootVolumeKeyMonitor private constructor(private val processes: List<Process>) {
-    fun close() = processes.forEach { runCatching { it.destroy() } }
+internal class RootVolumeKeyMonitor private constructor(private val readers: List<Reader>) {
+    private data class Reader(val process: Process, val thread: Thread)
+
+    fun close() {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(150)
+        readers.forEach { it.process.requestTermination() }
+        try {
+            for (reader in readers) {
+                val remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
+                if (remaining <= 0) break
+                reader.thread.join(remaining)
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
 
     companion object {
         private val deviceLine = Regex("""add device \d+: (/dev/input/event\d+)""")
@@ -10,26 +27,41 @@ internal class RootVolumeKeyMonitor private constructor(private val processes: L
         private val builtInDrivers = setOf("pmic_resin", "gpio-keys", "mtk-kpd", "qpnp_pon")
 
         fun start(onPress: () -> Unit): RootVolumeKeyMonitor? {
-            val listing = runCatching {
-                ProcessBuilder("/system/bin/getevent", "-lp").redirectErrorStream(true).start()
-                    .inputStream.bufferedReader().use { it.readText() }
-            }.getOrNull() ?: return null
+            val listing = readDeviceListing() ?: return null
             val devices = findDevices(listing)
             val readers = devices.mapNotNull { device ->
+                if (Thread.currentThread().isInterrupted) return@mapNotNull null
                 runCatching {
                     ProcessBuilder("/system/bin/getevent", "-ql", device).redirectErrorStream(true).start()
-                }.getOrNull()?.also { process ->
-                    Thread {
+                }.getOrNull()?.let { process ->
+                    val reader = Thread({
                         runCatching {
-                            process.inputStream.bufferedReader().forEachLine {
-                                if (volumeDown.containsMatchIn(it)) onPress()
+                            process.inputStream.bufferedReader().useLines { lines ->
+                                lines.forEach { if (volumeDown.containsMatchIn(it)) onPress() }
                             }
                         }
-                    }.apply { isDaemon = true; start() }
+                    }, "DeltaRootVolume").apply { isDaemon = true; start() }
+                    Reader(process, reader)
                 }
             }
             return readers.takeIf { it.isNotEmpty() }?.let(::RootVolumeKeyMonitor)
         }
+
+        private fun readDeviceListing(): String? = runCatching {
+            val process = ProcessBuilder("/system/bin/getevent", "-lp").redirectErrorStream(true).start()
+            val listing = AtomicReference<String?>()
+            val reader = Thread({
+                listing.set(runCatching { process.inputStream.bufferedReader().use { it.readText() } }.getOrNull())
+            }, "DeltaRootVolumeList").apply { isDaemon = true; start() }
+            try {
+                if (process.waitFor(600L, TimeUnit.MILLISECONDS) && process.exitValue() == 0) {
+                    reader.join(100L)
+                    listing.get()
+                } else null
+            } finally {
+                if (process.isAlive || reader.isAlive) process.requestTermination()
+            }
+        }.getOrNull()
 
         internal fun findDevices(listing: String): List<String> = deviceLine.findAll(listing).mapNotNull { device ->
             val end = deviceLine.find(listing, device.range.last + 1)?.range?.first ?: listing.length

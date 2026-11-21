@@ -248,20 +248,25 @@ class AppViewModel(
             require(rootUiAllowed) { "隔离测试宿主不执行演奏" }
             require(overlayAllowed) { "请先授权悬浮窗" }
             val backend = accessibilityBackend.status()
+            require(!rootBackend.releaseUncertain || rootBackend.preferred) { rootBackend.status().message }
             require(rootBackend.preferred || backend.available) { backend.message }
-            require(!rootBackend.releaseUncertain) { "上次 Root 触摸释放待确认，请检查游戏状态" }
             val runtime = PlaybackPreparation.runtimeState.value
             require(runtime.syncStatus == SyncStatus.USER_CONFIRMED) { "请先同步游戏音区与半音" }
             val calibratedLayout = requireNotNull(layout) { "请先保存校准布局" }
             val savedLayout = state.value.saved
             val speed = workspace.speed
-            val combined = workspace.combinedMode
             val minimumTouchMs = workspace.minimumTouchMs
+            val rootTiming = if (rootBackend.preferred) {
+                val candidate = com.huanhren.deltaharmonica.playback.RootPlaybackTiming()
+                candidate.copy(minNoteHoldMs = maxOf(minimumTouchMs, candidate.minNoteHoldMs))
+            } else null
+            val combined = workspace.combinedMode && rootTiming == null
             val combinedLeadMs = workspace.combinedLeadMs
             val planStarted = System.nanoTime()
             val plan = withContext(Dispatchers.Default) {
                 PlaybackPlanner.plan(script, calibratedLayout, runtime.pitchRegion, runtime.semitoneEnabled,
                     0, count, speed, combined = combined, minimumTouchMs = minimumTouchMs, combinedLeadMs = combinedLeadMs,
+                    rootTiming = rootTiming,
                     checkActive = { ensureActive() })
             }
             logScoreTiming("playback_plan", planStarted)
@@ -335,6 +340,7 @@ class AppViewModel(
     fun convertMidi(layout: InstrumentLayout?): Boolean = !libraryBusy.value && importPipeline.convertMidi(layout)
     private var preferredBackend = if (rootUiAllowed && preferences?.inputBackend?.value == "Root") "Root" else "Accessibility"
     internal val rootAuthorization get() = rootBackend.authorization.state
+    internal val rootSession get() = rootBackend.sessionState
     private val mutableState = MutableStateFlow(AppUiState(selectedBackend = preferredBackend))
     val state = mutableState.asStateFlow()
     private var testJob: Job? = null
@@ -354,12 +360,15 @@ class AppViewModel(
             }
         }
         viewModelScope.launch { AccessibilityConnection.connected.collect { refreshBackends() } }
-        if (rootUiAllowed) viewModelScope.launch { rootAuthorization.collect { refreshBackends() } }
+        if (rootUiAllowed) {
+            viewModelScope.launch { rootAuthorization.collect { refreshBackends() } }
+            viewModelScope.launch { rootSession.collect { refreshBackends() } }
+        }
     }
 
     fun refreshBackends() {
-        val useRoot = rootUiAllowed && preferredBackend == "Root" && rootAuthorization.value.canAttemptUse &&
-            !rootBackend.releaseUncertain
+        val useRoot = rootUiAllowed && preferredBackend == "Root" &&
+            (rootAuthorization.value.canAttemptUse || rootBackend.releaseUncertain)
         val active = if (useRoot) "Root" else "Accessibility"
         val backends = allBackends.map { backend -> backend.name to backend.status() }
         rootBackend.preferred = useRoot
@@ -368,7 +377,7 @@ class AppViewModel(
                 backends = backends,
                 selectedBackend = active,
                 preferredBackend = preferredBackend,
-                canTestSelectedInput = if (useRoot) !rootAuthorization.value.checking
+                canTestSelectedInput = if (useRoot) !rootAuthorization.value.checking && !rootBackend.releaseUncertain
                 else backends.any { (name, status) -> name == active && status.available },
             )
         }
@@ -384,22 +393,26 @@ class AppViewModel(
         refreshBackends()
         if (name == "Root" &&
             rootAuthorization.value.authorization in setOf(RootAuthorizationState.UNKNOWN, RootAuthorizationState.NOT_AUTHORIZED)
-        ) launchRootCheck(explicit = false)
+        ) launchRootCheck(rootBackend::checkAccessForUse)
     }
 
-    fun checkRoot() = launchRootCheck(explicit = true)
+    fun checkRoot() = launchRootCheck(rootBackend::checkAccess)
+
+    internal fun recoverRootInput() = launchRootCheck(rootBackend::recover)
+
+    internal fun rootDiagnosticReport(): String = rootBackend.diagnosticReport()
 
     internal fun detectRootEnvironment() {
         if (!rootUiAllowed || state.value.checkingRoot) return
         viewModelScope.launch { rootBackend.authorization.refreshEnvironment() }
     }
 
-    private fun launchRootCheck(explicit: Boolean) {
+    private fun launchRootCheck(check: suspend () -> BackendStatus) {
         if (!rootUiAllowed || state.value.checkingRoot) return
         mutableState.update { it.copy(checkingRoot = true) }
         viewModelScope.launch {
             try {
-                if (explicit) rootBackend.checkAccess() else rootBackend.checkAccessForUse()
+                check()
             } finally {
                 mutableState.update { it.copy(checkingRoot = false) }
                 refreshBackends()

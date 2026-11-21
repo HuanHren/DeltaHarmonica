@@ -3,11 +3,20 @@ param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$HostSha256,
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$TestSha256,
     [switch]$Execute,
-    [switch]$LiveOnlineLibrary
+    [switch]$LiveOnlineLibrary,
+    [switch]$RootContinuous,
+    [switch]$RootContinuousOnly,
+    [switch]$RootShortOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($RootContinuousOnly -and ($RootContinuous -or $LiveOnlineLibrary)) {
+    throw 'RootContinuousOnly is a standalone test selection'
+}
+if ($RootShortOnly -and ($RootContinuous -or $RootContinuousOnly -or $LiveOnlineLibrary)) {
+    throw 'RootShortOnly is a standalone test selection'
+}
 . (Join-Path $PSScriptRoot 'apk-provenance.ps1')
 . (Join-Path $PSScriptRoot 'safe-device-input.ps1')
 
@@ -179,6 +188,19 @@ try {
             $classes += 'OnlineLibraryLiveDeviceSmokeTest'
             $expectedCount += 2
             $liveArguments = @('-e','liveOnlineLibrary','true')
+        }
+        if ($RootShortOnly) {
+            $classes = @('RootContinuousDeviceTest#eightAndSixteenNotesReachTheIsolatedWindowInOrder')
+            $expectedCount = 1
+            $liveArguments = @('-e','rootContinuous','true')
+        } elseif ($RootContinuousOnly) {
+            $classes = @('RootContinuousDeviceTest')
+            $expectedCount = 3
+            $liveArguments = @('-e','rootContinuous','true')
+        } elseif ($RootContinuous) {
+            $classes += 'RootContinuousDeviceTest'
+            $expectedCount += 3
+            $liveArguments += @('-e','rootContinuous','true')
         }
         $selection = ($classes | ForEach-Object { "com.huanhren.deltaharmonica.$_" }) -join ','
         $run = @(Invoke-PinnedAdb ($route + @('shell','am','instrument','--user','0','-w','-r','-e','class',$selection) + $liveArguments + @("$($script:IsolatedTestId)/$runner")) 'instrumentation')
