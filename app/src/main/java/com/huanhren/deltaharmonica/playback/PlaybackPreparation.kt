@@ -24,15 +24,47 @@ data class ActualTiming(val dispatchMs: Long, val callbackMs: Long?, val noteOff
     val callbackLatencyMs: Long? get() = callbackMs?.minus(dispatchMs)
 }
 object PlaybackPreparation {
+    /** Ownership of the arming coroutine and, after handoff, its playback runner. Main thread only. */
+    internal class Session internal constructor(val cancelStart: () -> Unit) {
+        var runner: PlaybackRunner? = null
+            internal set
+    }
+
     var pending: PreparedPlayback? = null
-    var activeRunner: PlaybackRunner? = null
+    private var session: Session? = null
+    val activeRunner: PlaybackRunner? get() = session?.runner
+    val cancelPendingStart: (() -> Unit)? get() = session?.takeIf { it.runner == null }?.cancelStart
     internal var activeInput: PlaybackInput? = null
     internal var confirmResume: (() -> Boolean)? = null
-    var cancelPendingStart: (() -> Unit)? = null
     var controlsConfirmed = false
     val progress = MutableStateFlow(PlaybackProgress())
     val runtimeState = MutableStateFlow(InstrumentRuntimeState())
     val actualTimings = mutableMapOf<Int, ActualTiming>()
+
+    internal fun beginSession(cancelStart: () -> Unit): Session? {
+        if (session != null) return null
+        return Session(cancelStart).also { session = it }
+    }
+
+    internal fun owns(owner: Session): Boolean = session === owner
+
+    internal fun attachRunner(owner: Session, runner: PlaybackRunner): Boolean {
+        if (!owns(owner) || owner.runner != null || progress.value.phase == PlaybackStatus.STOPPING) return false
+        owner.runner = runner
+        return true
+    }
+
+    internal fun finishSession(owner: Session, terminal: PlaybackProgress): Boolean {
+        if (!owns(owner)) return false
+        session = null
+        activeInput = null
+        confirmResume = null
+        progress.value = terminal
+        return true
+    }
+
+    internal fun stopPlayback(owner: Session): Boolean = owns(owner) && stopPlayback()
+
     fun togglePause(): Boolean {
         val runner = activeRunner ?: return false
         val current = progress.value
@@ -42,6 +74,7 @@ object PlaybackPreparation {
                 progress.value = current.copy(state = "等待当前音符释放", phase = PlaybackStatus.PAUSING)
             }
             PlaybackStatus.PAUSED -> {
+                if (!runner.pauseRequested) return false
                 if (confirmResume?.invoke() == false) return false
                 runner.requestResume()
             }

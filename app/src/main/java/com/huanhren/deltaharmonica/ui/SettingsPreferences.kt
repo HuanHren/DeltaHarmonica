@@ -2,6 +2,8 @@ package com.huanhren.deltaharmonica.ui
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
@@ -43,6 +45,7 @@ import com.huanhren.deltaharmonica.input.BackendAvailability
 import com.huanhren.deltaharmonica.input.BackendStatus
 import com.huanhren.deltaharmonica.input.RootAuthorizationState
 import com.huanhren.deltaharmonica.input.RootInputReadiness
+import com.huanhren.deltaharmonica.input.RootSessionPhase
 import com.huanhren.deltaharmonica.playback.PlaybackPreparation
 import com.huanhren.deltaharmonica.ui.theme.*
 import top.yukonga.miuix.kmp.basic.BasicComponent
@@ -163,7 +166,9 @@ internal fun SystemPreferences(state: AppUiState, model: AppViewModel, onAppeara
 
 @Composable
 private fun RootAuthorizationPreferences(state: AppUiState, model: AppViewModel, idle: Boolean) {
+    val context = LocalContext.current
     val root by model.rootAuthorization.collectAsStateWithLifecycle()
+    val session by model.rootSession.collectAsStateWithLifecycle()
     val readyBackend = state.selectedBackend.takeIf { state.selectedBackendStatus?.available == true }
     val canChange = idle && !state.checkingRoot
     PreferenceGroup(R.string.root_preferences) {
@@ -202,6 +207,24 @@ private fun RootAuthorizationPreferences(state: AppUiState, model: AppViewModel,
                 RootInputReadiness.UNAVAILABLE -> R.string.root_input_unavailable
             }),
         )
+        BasicComponent(
+            title = stringResource(R.string.root_session_status),
+            summary = stringResource(when (session.phase) {
+                RootSessionPhase.IDLE -> R.string.root_session_idle
+                RootSessionPhase.PREPARING -> R.string.root_session_preparing
+                RootSessionPhase.ACTIVE -> R.string.root_session_active
+                RootSessionPhase.CLEANING -> R.string.root_session_cleaning
+                RootSessionPhase.RECOVERY_REQUIRED -> R.string.root_session_recovery_required
+                RootSessionPhase.RECOVERING -> R.string.root_session_recovering
+            }),
+        )
+        session.id?.let { BasicComponent(title = stringResource(R.string.root_session_id), summary = it) }
+        session.helper?.let { BasicComponent(title = stringResource(R.string.root_session_helper), summary = it.pid.toString()) }
+        session.detail?.let { BasicComponent(title = stringResource(R.string.root_session_detail), summary = it) }
+        if (session.recoveryAttempts > 0) BasicComponent(
+            title = stringResource(R.string.root_session_recovery_attempts),
+            summary = session.recoveryAttempts.toString(),
+        )
         BasicComponent(title = stringResource(R.string.root_current_backend), summary =
             if (readyBackend != null) backendLabel(readyBackend) else stringResource(R.string.root_no_usable_backend))
         ArrowPreference(
@@ -213,6 +236,21 @@ private fun RootAuthorizationPreferences(state: AppUiState, model: AppViewModel,
             title = stringResource(R.string.root_request_authorization),
             enabled = canChange,
             onClick = model::checkRoot,
+        )
+        ArrowPreference(
+            title = stringResource(R.string.root_recover_input),
+            enabled = canChange && (session.phase == RootSessionPhase.IDLE || session.phase == RootSessionPhase.RECOVERY_REQUIRED),
+            onClick = model::recoverRootInput,
+        )
+        val copyDiagnosticsLabel = stringResource(R.string.root_copy_diagnostics)
+        ArrowPreference(
+            title = copyDiagnosticsLabel,
+            enabled = session.id != null || session.recoveryRequired,
+            onClick = {
+                context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                    ClipData.newPlainText(copyDiagnosticsLabel, model.rootDiagnosticReport()),
+                )
+            },
         )
         OverlayDropdownPreference(
             listOf(backendLabel("Root"), backendLabel("Accessibility")),

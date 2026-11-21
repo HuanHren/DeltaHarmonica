@@ -25,4 +25,17 @@
     <string name="root_detect_environment">Check device environment</string>
     <string name="root_request_authorization">Check or request Root access</string>
     <string name="root_preferred_backend">Preferred input backend</string>
+    <string name="root_session_status">Root session status</string>
+    <string name="root_session_idle">Idle</string>
+    <string name="root_session_preparing">Starting the Root helper</string>
+    <string name="root_session_active">Root helper connected, input in use</string>
+    <string name="root_session_cleaning">Releasing touches and closing the session</string>
+    <string name="root_session_recovery_required">Recovery required. Input locked</string>
+    <string name="root_session_recovering">Recovering Root input</string>
+    <string name="root_session_id">Session ID</string>
+    <string name="root_session_helper">Recorded helper process ID</string>
+    <string name="root_session_detail">Session diagnostics</string>
+    <string name="root_session_recovery_attempts">Recovery attempts</string>
+    <string name="root_recover_input">Recover Root input</string>
+    <string name="root_copy_diagnostics">Copy Root session diagnostics</string>
 </resources>

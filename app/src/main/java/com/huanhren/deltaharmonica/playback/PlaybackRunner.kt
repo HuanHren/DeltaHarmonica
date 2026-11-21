@@ -8,6 +8,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 data class ContinuousPlaybackResult(val completed: Int, val result: TapResult, val maxLatenessMs: Long = 0)
 
@@ -17,9 +18,12 @@ data class PlaybackResult(val completed: Int, val remaining: Int, val stopped: B
 class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
     constructor() : this({ System.nanoTime() / 1_000_000 })
 
-    private companion object { const val WINDOW_TIMEOUT_MS = 3_000L }
+    private companion object {
+        const val WINDOW_TIMEOUT_MS = 3_000L
+        const val STOP_NOT_REQUESTED = Long.MIN_VALUE
+    }
 
-    private val stop = AtomicBoolean(false)
+    private val stopAt = AtomicLong(STOP_NOT_REQUESTED)
     private val mutex = Mutex()
     private val pause = AtomicBoolean(false)
     private var startedAt: Long? = null
@@ -35,8 +39,10 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
 
     fun requestPause() { pause.set(true) }
     fun requestResume() { pause.set(false) }
-    fun requestStop() { stop.set(true) }
-    internal val stopRequested: Boolean get() = stop.get()
+    fun requestStop() { stopAt.compareAndSet(STOP_NOT_REQUESTED, nowMs()) }
+    internal val pauseRequested: Boolean get() = pause.get()
+    internal val stopRequestedAtMs: Long? get() = stopAt.get().takeUnless { it == STOP_NOT_REQUESTED }
+    internal val stopRequested: Boolean get() = stopRequestedAtMs != null
     internal fun continuousStarted(helperUptimeMs: Long) { startedAt = helperUptimeMs }
     suspend fun run(plan: PlaybackPlan, hide: () -> Unit, awaitWindows: suspend () -> Unit, valid: () -> Boolean,
                     dispatch: suspend (String,Long) -> TapResult, restore: () -> Unit,
@@ -56,22 +62,23 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
         pausedMs = 0L
         finishedElapsedMs = null
         var completed=0; var failure: String?=null; var maxLate=0L; var regionSwitches=0; var semitoneSwitches=0
+        var acknowledgedStop = false
         suspend fun waitUntil(target: Long): Boolean {
             while (true) {
-                if (stop.get()) return false
+                if (stopRequested) return false
                 if (!valid()) { failure="显示环境或无障碍服务已变化"; return false }
                 if (pause.get()) {
                     val at = nowMs()
                     pauseStartedAt = at
                     onPhase(PlaybackPhase.PAUSED)
-                    while (pause.get() && !stop.get() && valid()) delay(35)
-                    if (stop.get()) return false
+                    while (pause.get() && !stopRequested && valid()) delay(35)
+                    if (stopRequested) return false
                     if (!valid()) { failure = "显示环境或无障碍服务已变化"; return false }
                     val windowsReady = withTimeoutOrNull(WINDOW_TIMEOUT_MS) {
                         onResuming()
                         true
                     } == true
-                    if (stop.get()) return false
+                    if (stopRequested) return false
                     if (!windowsReady) {
                         failure = "恢复前等待演奏控制窗口超时"
                         return false
@@ -87,12 +94,12 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
             }
         }
         suspend fun perform(target: String, duration: Long): Boolean {
-            if (stop.get()) return false
+            if (stopRequested) return false
             if (!valid()) { failure="显示环境或无障碍服务已变化"; return false }
             onPhase(PlaybackPhase.WAITING_FOR_GESTURE)
             val result=dispatch(target,duration)
             onPhase(PlaybackPhase.GESTURE_FINISHED)
-            if (result == TapResult.Cancelled && stop.get()) return false
+            if (result == TapResult.Cancelled && stopRequested) return false
             if (result != TapResult.Completed) { failure="手势未完成：$result；释放状态需检查"; return false }
             if (!valid()) { failure="手势期间显示环境或无障碍服务已变化"; return false }
             return true
@@ -132,8 +139,8 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
                     maxLate = maxOf(maxLate, continuous.maxLatenessMs)
                     if (continuous.completed != completed) {
                         failure = "Root 逐音计数不一致，释放状态需检查"
-                    } else if (continuous.result == TapResult.Cancelled && stop.get()) {
-                        // Stopped by the user after releasing the active stroke.
+                    } else if (continuous.result == TapResult.Cancelled && stopRequested) {
+                        acknowledgedStop = true
                     } else if (continuous.result != TapResult.Completed) {
                         failure = "Root 连续触控未完成：${continuous.result}"
                     } else if (!valid()) {
@@ -148,11 +155,12 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
                         val late=(now+lead-item.predictedStartMs).coerceAtLeast(0)
                         maxLate=maxOf(maxLate,late)
                         if (late > 2000) { failure="事件延迟超过 2000 ms，已停止后续事件"; break }
-                        if (stop.get() || !valid()) { failure="停止或环境已变化"; break }
+                        if (stopRequested) break
+                        if (!valid()) { failure="显示环境或无障碍服务已变化"; break }
                         onPhase(PlaybackPhase.WAITING_FOR_GESTURE)
                         val result = requireNotNull(dispatchCombined) { "组合手势不可用" }(item,item.predictedEndMs-item.predictedStartMs)
                         onPhase(PlaybackPhase.GESTURE_FINISHED)
-                        if (result == TapResult.Cancelled && stop.get()) break
+                        if (result == TapResult.Cancelled && stopRequested) break
                         if (result != TapResult.Completed) { failure="组合手势未完成：$result；请检查状态与音键释放"; break }
                         if(item.regionSwitch) regionSwitches++
                         if(item.semitoneSwitch) semitoneSwitches++
@@ -192,6 +200,7 @@ class PlaybackRunner internal constructor(private val nowMs: () -> Long) {
             } finally { mutex.unlock() }
         }
         onPhase(PlaybackPhase.TERMINATED)
-        return PlaybackResult(completed,plan.events.size-completed,stop.get(),failure,maxLate,elapsedMs(),regionSwitches,semitoneSwitches)
+        val stopped = acknowledgedStop || (completed < plan.events.size && stopRequested)
+        return PlaybackResult(completed,plan.events.size-completed,stopped,failure,maxLate,elapsedMs(),regionSwitches,semitoneSwitches)
     }
 }

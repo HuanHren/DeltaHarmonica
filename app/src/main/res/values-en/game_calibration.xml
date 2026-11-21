@@ -65,7 +65,7 @@
     <string name="game_cal_save_before_test">Save the calibration before testing.</string>
     <string name="game_cal_target_missing">The selected target is missing.</string>
     <string name="game_cal_note_required">Select a note key, or use Test tap for a control.</string>
-    <string name="game_cal_root_release">Confirm that the previous Root touch released in the game.</string>
+    <string name="game_cal_root_release">Root touch release is unconfirmed. Recover Root input in Settings.</string>
     <string name="game_cal_input_needed">Input is unavailable. Check Root or Accessibility settings.</string>
     <string name="game_cal_layout_required">Recalibrate the layout for the current display.</string>
     <string name="game_cal_manual_control">Sync the game state again after testing a control.</string>

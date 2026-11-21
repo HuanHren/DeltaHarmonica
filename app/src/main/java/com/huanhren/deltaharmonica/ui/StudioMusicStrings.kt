@@ -70,7 +70,7 @@ internal fun musicBackendStatus(message: String?): String {
         "su 未返回 Root UID；请检查授权" -> R.string.music_backend_root_uid
         "Root 授权检查超时；请检查授权提示" -> R.string.music_backend_root_timeout
         "Root 授权检查已取消" -> R.string.music_backend_root_cancelled
-        "上次 Root 触摸释放待确认，请检查游戏后重启应用" -> R.string.music_backend_root_release
+        "Root 触控释放待确认，可在设置中恢复 Root 输入状态" -> R.string.music_backend_root_release
         "Root 点击超时，请重新检查授权" -> R.string.music_backend_root_tap_timeout
         "未实现 · Stage 1 不可用" -> R.string.music_backend_unavailable
         else -> null

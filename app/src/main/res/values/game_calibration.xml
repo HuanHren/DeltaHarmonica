@@ -65,7 +65,7 @@
     <string name="game_cal_save_before_test">请先保存校准，再测试。</string>
     <string name="game_cal_target_missing">找不到选中的目标。</string>
     <string name="game_cal_note_required">请选择音键，或用测试点击检查控制键。</string>
-    <string name="game_cal_root_release">上次 Root 触摸释放待确认，请先检查游戏。</string>
+    <string name="game_cal_root_release">Root 触控释放待确认，可在设置中恢复 Root 输入状态。</string>
     <string name="game_cal_input_needed">输入服务未连接。请检查 Root 或无障碍设置。</string>
     <string name="game_cal_layout_required">布局未校准或显示环境不匹配，请重新校准。</string>
     <string name="game_cal_manual_control">手动测试控制键后，请重新同步游戏状态。</string>

@@ -25,4 +25,17 @@
     <string name="root_detect_environment">检测设备环境</string>
     <string name="root_request_authorization">检查或重新申请 Root 授权</string>
     <string name="root_preferred_backend">首选输入后端</string>
+    <string name="root_session_status">Root 会话状态</string>
+    <string name="root_session_idle">空闲</string>
+    <string name="root_session_preparing">正在启动 Root helper</string>
+    <string name="root_session_active">Root helper 已连接，会话占用输入</string>
+    <string name="root_session_cleaning">正在释放触点并关闭会话</string>
+    <string name="root_session_recovery_required">需要恢复，输入暂时锁定</string>
+    <string name="root_session_recovering">正在恢复 Root 输入状态</string>
+    <string name="root_session_id">会话 ID</string>
+    <string name="root_session_helper">已记录的 helper 进程 ID</string>
+    <string name="root_session_detail">会话诊断</string>
+    <string name="root_session_recovery_attempts">恢复尝试次数</string>
+    <string name="root_recover_input">恢复 Root 输入状态</string>
+    <string name="root_copy_diagnostics">复制 Root 会话诊断</string>
 </resources>

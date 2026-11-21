@@ -40,7 +40,7 @@
     <string name="music_backend_root_uid">su did not return a Root UID. Check authorization</string>
     <string name="music_backend_root_timeout">Root check timed out. Check the authorization prompt</string>
     <string name="music_backend_root_cancelled">Root authorization check canceled</string>
-    <string name="music_backend_root_release">Check that the last Root touch released in the game, then restart the app</string>
+    <string name="music_backend_root_release">Root touch release is unconfirmed. Recover Root input in Settings.</string>
     <string name="music_backend_root_tap_timeout">Root tap timed out. Check authorization again</string>
     <string name="music_backend_unavailable">This backend is unavailable</string>
     <string name="music_error_library_missing">This track does not exist</string>
