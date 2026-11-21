@@ -52,6 +52,28 @@ class PlaybackPlanTest {
         assertEquals(2, plan.shortenedNotes)
         assertTrue(plan.warnings.any { it.contains("时间预算不足") })
     }
+
+    @Test fun rootReportsShortnessAfterClippingAndShowsTheConstrainedTransition() {
+        val timing = RootPlaybackTiming()
+        val song = script().copy(events = listOf(
+            ScriptEvent(0, 200, 62, "NOTE_2", Region.NATURAL, false),
+            ScriptEvent(200, 20, 62, "NOTE_2", Region.NATURAL, false),
+            ScriptEvent(232, 20, 62, "NOTE_2", Region.NATURAL, false),
+            ScriptEvent(270, 200, 75, "NOTE_2", Region.HIGH, true),
+        ))
+        val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, 4, 1.0, rootTiming = timing)
+
+        assertTrue(plan.fatalErrors.toString(), plan.fatalErrors.isEmpty())
+        assertEquals(listOf(62, 62, 62, 75), plan.events.map { it.event.midiNote })
+        assertEquals(2, plan.extendedNotes)
+        assertEquals(1, plan.shortenedNotes)
+        assertEquals(listOf(146L, 45L, 45L, 200L), plan.events.map { it.predictedEndMs - it.predictedStartMs })
+        assertTrue(plan.warnings.toString(), plan.warnings.any { it.contains("3 个音符短于") })
+        assertTrue(plan.warnings.toString(), plan.warnings.any {
+            it.contains("同键 2") && it.contains("控制切换 1") &&
+                it.contains("第 4 个音符") && it.contains("38 ms") && it.contains("259 ms")
+        })
+    }
     @Test fun gestureOverheadIsBudgetedOnlyWhenTheOriginalTimelineHasNoRoom() {
         val dense = script().copy(events=(0..2).map { ScriptEvent(it*100L,100,62,"NOTE_2",Region.NATURAL,false) })
         val plan=PlaybackPlanner.plan(dense,layout,Region.NATURAL,false,0,3,1.0,gestureOverheadMs=30)

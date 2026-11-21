@@ -200,4 +200,26 @@ class RootSequenceTimelineTest {
         assertEquals("UNCONFIRMED", result.status)
         assertEquals(0, result.completed)
     }
+
+    @Test fun missingOrInvalidNoteReleaseCannotCompleteASequence() {
+        for (proof in listOf(
+            RootTouchOutcome("OK", 10, null),
+            RootTouchOutcome("OK", null, 60),
+            RootTouchOutcome("OK", 10, 9),
+            RootTouchOutcome("OK", 10, 10),
+        )) {
+            var gestures = 0
+            val events = mutableListOf<String>()
+            val result = RootSequenceTimeline.play(
+                listOf(step(0), step(100)),
+                now = { 0L }, waitFor = { 0L },
+                playGesture = { gestures++; proof },
+                onNote = { _, note -> events.add(note.status) },
+            )
+
+            assertEquals(RootSequenceOutcome("UNCONFIRMED", 0), result)
+            assertEquals(listOf("UNCONFIRMED"), events)
+            assertEquals(1, gestures)
+        }
+    }
 }

@@ -91,6 +91,23 @@ class RootTouchTimelineTest {
         fixture.rejectCancel = true
         assertFalse(fixture.play(listOf(RootStroke(1f, 2f, 0, 100))))
         assertEquals("UNCONFIRMED", fixture.status)
+        assertEquals(setOf(0), fixture.uncertainPointerIds)
+    }
+
+    @Test fun transportLossRetainsOnlyPointersWithoutConfirmedRelease() {
+        var now = 0L
+        val outcome = RootTouchTimeline.play(
+            listOf(RootStroke(1f, 1f, 0, 1_000), RootStroke(2f, 2f, 40, 1_000)),
+            now = { now },
+            waitUntil = {
+                if (it > 40L) throw RootTransportInterrupted()
+                now = it
+            },
+        ) { kind, _, _, _, _ -> kind != RootTouchKind.CANCEL }
+        assertEquals("UNCONFIRMED", outcome.status)
+        assertEquals(40L, outcome.noteDown)
+        assertEquals(40L, outcome.noteUp)
+        assertEquals(setOf(0), outcome.uncertainPointerIds)
     }
 
     private class Fixture {
@@ -102,6 +119,7 @@ class RootTouchTimelineTest {
         var rejectCancel = false
         var stopAt: Long? = null
         var status: String? = null
+        var uncertainPointerIds: Set<Int>? = null
         val events = mutableListOf<String>()
 
         fun play(strokes: List<RootStroke>): Boolean = RootTouchTimeline.play(
@@ -120,6 +138,9 @@ class RootTouchTimelineTest {
             events += "$kind:$id:${pointers.keys.toList()}@$timestamp"
             if (rejectBeforeDispatch) throw RootDispatchDenied()
             !(rejectDown && kind == RootTouchKind.DOWN || rejectCancel && kind == RootTouchKind.CANCEL)
-        }.also { status = it.status }.completed
+        }.also {
+            status = it.status
+            uncertainPointerIds = it.uncertainPointerIds
+        }.completed
     }
 }

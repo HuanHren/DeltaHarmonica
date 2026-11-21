@@ -2,9 +2,6 @@ package com.huanhren.deltaharmonica
 
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
-import android.system.Os
-import android.system.OsConstants
-import android.system.StructPollfd
 import android.util.Log
 import android.view.Display
 import android.view.MotionEvent
@@ -15,7 +12,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.huanhren.deltaharmonica.input.RootCleanup
 import com.huanhren.deltaharmonica.input.RootGestureConnection
 import com.huanhren.deltaharmonica.input.RootSequencePlanner
-import com.huanhren.deltaharmonica.input.RootSequenceProtocol
 import com.huanhren.deltaharmonica.input.RootTouchMain
 import com.huanhren.deltaharmonica.input.TapResult
 import com.huanhren.deltaharmonica.midi.MonophonyPolicy
@@ -43,6 +39,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayInputStream
 import java.io.Closeable
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
@@ -284,16 +281,18 @@ class RootContinuousDeviceTest {
                 }
                 check(view.focused)
                 // The shell grant drives a helper limited to the isolated UID. The host keeps its disabled Root runner.
-                val command = "exec su -c 'CLASSPATH=$apk exec /system/bin/app_process /system/bin ${RootTouchMain::class.java.name} $uid' 2>&1"
+                val sessionId = UUID.randomUUID().toString()
+                val command = "exec su -c 'CLASSPATH=$apk exec /system/bin/app_process /system/bin " +
+                    "${RootTouchMain::class.java.name} $uid $sessionId' 2>&1"
                 // UiAutomation tokenizes its command using Runtime.exec. Send the quoted launch
                 // line to the shell first, then use the same pipe for the helper's protocol.
                 ShellProcess(instrumentation.uiAutomation.executeShellCommandRw("/system/bin/sh -es")).use { process ->
                     process.outputStream.write("$command\n".toByteArray(Charsets.US_ASCII))
                     process.outputStream.flush()
-                    process.expectReady()
                     val touch = RootGestureConnection(process, null)
                     var failure: Throwable? = null
                     try {
+                        check(touch.awaitReady(sessionId)) { "Isolated shell Root helper did not become ready" }
                         check(view.focused)
                         test(view, fixture.first, fixture.second, touch)
                     } catch (problem: Throwable) {
@@ -381,30 +380,6 @@ class RootContinuousDeviceTest {
         override fun waitFor(): Int = error("UiAutomation exposes shell pipes, no wait handle")
         override fun exitValue(): Int = throw IllegalThreadStateException("UiAutomation exposes no exit code")
         override fun destroy() = close()
-
-        fun expectReady() {
-            val deadline = SystemClock.uptimeMillis() + 4_000
-            val poll = StructPollfd().apply {
-                fd = outputDescriptor.fileDescriptor
-                events = OsConstants.POLLIN.toShort()
-            }
-            val line = StringBuilder()
-            var lastLine = ""
-            while (SystemClock.uptimeMillis() < deadline) {
-                val remaining = (deadline - SystemClock.uptimeMillis()).coerceAtLeast(0).toInt()
-                if (Os.poll(arrayOf(poll), remaining) == 0) break
-                val next = output.read()
-                if (next == -1) break
-                if (next == 10) {
-                    lastLine = line.toString().trimEnd()
-                    if (lastLine == "DELTA READY ${RootSequenceProtocol.VERSION}") return
-                    line.setLength(0)
-                } else if (line.length < 300) {
-                    line.append(next.toChar())
-                }
-            }
-            error("Isolated shell Root helper did not become ready: $lastLine$line")
-        }
 
         override fun close() {
             runCatching { input.close() }

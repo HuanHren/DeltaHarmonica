@@ -10,6 +10,26 @@ import org.junit.Test
 class RootSequenceProtocolTest {
     private val note = RootSequenceStep(80, listOf(RootStroke(1f, 2f, 0, 45)))
 
+    @Test fun readyMustIdentifyTheMatchingSessionAndVersion() {
+        val sessionId = "2a1e96c6-c578-4f21-92ed-b4dcbbe13caa"
+        assertTrue(RootSequenceProtocol.validSessionId(sessionId))
+        assertFalse(RootSequenceProtocol.validSessionId("1-1-1-1-1"))
+        assertEquals(RootHelperIdentity(73, 190_892), RootSequenceProtocol.decodeReady("READY 3 $sessionId 73 190892", sessionId))
+        assertNull(RootSequenceProtocol.decodeReady("READY 2 $sessionId 73 190892", sessionId))
+        assertNull(RootSequenceProtocol.decodeReady("READY 3 wrong-token 73 190892", sessionId))
+        assertNull(RootSequenceProtocol.decodeReady("READY 3 $sessionId 1 190892", sessionId))
+        assertNull(RootSequenceProtocol.decodeReady("READY 3 $sessionId 73 0", sessionId))
+    }
+
+    @Test fun processStartTicksSurviveSpacesAndParensInCommandName() {
+        val middle = List(18) { "0" }.joinToString(" ")
+        assertEquals(
+            RootHelperIdentity(73, 190_892),
+            RootSequenceProtocol.decodeProcessStat("73 (one ) two (three) S $middle 190892 0 0"),
+        )
+        assertNull(RootSequenceProtocol.decodeProcessStat("73 (truncated) S 0 0"))
+    }
+
     @Test fun commitRequiresEveryIndexExactlyOnce() {
         val upload = RootSequenceUpload(2)
         assertFalse(upload.append(1, RootSequenceProtocol.encode(note)))

@@ -3,9 +3,15 @@ package com.huanhren.deltaharmonica.input
 internal data class RootStroke(val x: Float, val y: Float, val startMs: Long, val durationMs: Long)
 internal enum class RootTouchKind { DOWN, UP, CANCEL }
 internal class RootDispatchDenied : Exception()
+internal class RootTransportInterrupted : Exception()
 private class RootDownLate : Exception()
 
-internal data class RootTouchOutcome(val status: String, val noteDown: Long?, val noteUp: Long?) {
+internal data class RootTouchOutcome(
+    val status: String,
+    val noteDown: Long?,
+    val noteUp: Long?,
+    val uncertainPointerIds: Set<Int>? = null,
+) {
     val completed get() = status == "OK"
 }
 
@@ -45,9 +51,21 @@ internal object RootTouchTimeline {
             }
         }
 
-        fun cancel(): Boolean = active.isEmpty() || runCatching {
-            emit(RootTouchKind.CANCEL, active.keys.first(), active, downTime, now())
-        }.getOrDefault(false)
+        fun release(status: String): RootTouchOutcome {
+            val cancelled = active.isEmpty() || runCatching {
+                emit(RootTouchKind.CANCEL, active.keys.first(), active, downTime, now())
+            }.getOrDefault(false)
+            if (!cancelled) return RootTouchOutcome("UNCONFIRMED", noteDown, noteUp, active.keys.toSet())
+            active.clear()
+            deadlines.clear()
+            return RootTouchOutcome(status, noteDown, noteUp)
+        }
+
+        fun interrupted(status: String): RootTouchOutcome {
+            // Complete the note normally. Cancel partially performed control strokes.
+            if (note in active) runCatching { up(note, now()) }
+            return release(status)
+        }
 
         try {
             while (pending.isNotEmpty() || active.isNotEmpty()) {
@@ -80,14 +98,13 @@ internal object RootTouchTimeline {
                 }
             }
         } catch (_: InterruptedException) {
-            // Complete the note normally. Cancel partially performed control strokes.
-            if (note in active) runCatching { up(note, now()) }
-            val released = cancel()
-            return RootTouchOutcome(if (released) "STOPPED" else "UNCONFIRMED", noteDown, noteUp)
+            return interrupted("STOPPED")
+        } catch (_: RootTransportInterrupted) {
+            return interrupted("TRANSPORT")
         } catch (_: RootDownLate) {
-            return RootTouchOutcome(if (cancel()) "LATE" else "UNCONFIRMED", noteDown, noteUp)
+            return release("LATE")
         } catch (_: Exception) {
-            return RootTouchOutcome(if (cancel()) "FAILED" else "UNCONFIRMED", noteDown, noteUp)
+            return release("FAILED")
         }
         return RootTouchOutcome("OK", noteDown, noteUp)
     }

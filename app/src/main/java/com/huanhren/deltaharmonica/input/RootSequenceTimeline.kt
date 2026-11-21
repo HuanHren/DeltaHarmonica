@@ -69,6 +69,8 @@ internal object RootSequenceTimeline {
                 } while (pausedHere > 0L)
             } catch (_: InterruptedException) {
                 return RootSequenceOutcome("STOPPED", completed)
+            } catch (_: RootTransportInterrupted) {
+                return RootSequenceOutcome("TRANSPORT", completed)
             } catch (_: Exception) {
                 return RootSequenceOutcome("FAILED", completed)
             }
@@ -76,18 +78,24 @@ internal object RootSequenceTimeline {
             val plannedStart = startAt + pauseShift
             if (now() - plannedStart > step.maxLatenessMs + ROOT_RECOVERY_WINDOW_MS)
                 return RootSequenceOutcome("LATE", completed)
-            val outcome = try {
+            val receipt = try {
                 playTimedGesture?.invoke(step, plannedStart) ?: playGesture(step.strokes)
             } catch (_: Exception) {
                 return RootSequenceOutcome("UNCONFIRMED", completed)
             }
             releasedAt = now()
-            onScheduledNote(index, outcome, origin + step.noteAtMs + pauseShift)
+            val plannedNoteAt = origin + step.noteAtMs + pauseShift
+            val down = receipt.noteDown
+            val up = receipt.noteUp
+            val outcome = if (receipt.completed && (down == null || down < plannedNoteAt || up == null || up <= down)) {
+                receipt.copy(status = "UNCONFIRMED", noteUp = null)
+            } else receipt
+            onScheduledNote(index, outcome, plannedNoteAt)
             onNote(index, outcome)
             if (!outcome.completed) return RootSequenceOutcome(outcome.status, completed)
             completed++
             previousPlannedUp = step.noteAtMs + step.strokes.last().durationMs
-            val noteDelay = (outcome.noteDown ?: (plannedStart + lead)) - (plannedStart + lead)
+            val noteDelay = checkNotNull(down) - (plannedStart + lead)
             if (noteDelay > step.maxLatenessMs) {
                 // Preserve the phase after a recoverable stall instead of replaying stale events.
                 timelineShift += noteDelay

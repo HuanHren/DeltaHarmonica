@@ -1,8 +1,12 @@
 package com.huanhren.deltaharmonica.input
 
+import java.util.UUID
+
+internal data class RootHelperIdentity(val pid: Int, val startTicks: Long)
+
 /** Private, versioned text framing shared by the app and the helper from the same APK. */
 internal object RootSequenceProtocol {
-    const val VERSION = 2
+    const val VERSION = 3
     const val MAX_NOTES = 100_000
     const val CHUNK_SIZE = 32
     const val BUFFER_SIZE = 256
@@ -10,6 +14,27 @@ internal object RootSequenceProtocol {
     private const val MAX_STROKES_TEXT = 200
     private const val MAX_STEP_TEXT = MAX_STROKES_TEXT + 72
 
+    fun validSessionId(sessionId: String): Boolean =
+        runCatching { UUID.fromString(sessionId).toString() == sessionId }.getOrDefault(false)
+
+    fun decodeReady(reply: String, sessionId: String): RootHelperIdentity? {
+        val fields = reply.split(' ')
+        if (fields.size != 5 || fields[0] != "READY" || fields[1] != VERSION.toString() || fields[2] != sessionId) return null
+        val pid = fields[3].toIntOrNull()?.takeIf { it > 1 } ?: return null
+        val startTicks = fields[4].toLongOrNull()?.takeIf { it > 0 } ?: return null
+        return RootHelperIdentity(pid, startTicks)
+    }
+
+    fun decodeProcessStat(stat: String): RootHelperIdentity? {
+        // comm can contain spaces and parentheses. Linux fields after its last ')' begin at field 3.
+        val commStart = stat.indexOf('(')
+        val commEnd = stat.lastIndexOf(')')
+        if (commStart <= 0 || commEnd <= commStart) return null
+        val pid = stat.substring(0, commStart).trim().toIntOrNull()?.takeIf { it > 1 } ?: return null
+        val startTicks = stat.substring(commEnd + 1).trim().split(Regex("\\s+"))
+            .getOrNull(19)?.toLongOrNull()?.takeIf { it > 0 } ?: return null
+        return RootHelperIdentity(pid, startTicks)
+    }
     fun encode(step: RootSequenceStep): String =
         "${step.noteAtMs},${step.minGapMs},${step.maxLatenessMs}|${encodeStrokes(step.strokes)}"
 

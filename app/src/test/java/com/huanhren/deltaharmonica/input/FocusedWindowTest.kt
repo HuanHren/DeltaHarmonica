@@ -49,6 +49,17 @@ class FocusedWindowTest {
         assertNull(FocusedWindow.parseIdentity("$first\n$second"))
         assertEquals(observed, FocusedWindow.parseIdentity("$first\nmCurrentFocus=null"))
     }
+
+    @Test fun aTitleOnlySystemWindowImmediatelyInvalidatesCachedGameFocus() {
+        val game = "mCurrentFocus=Window{abc u0 com.tencent.tmgp.dfm/.GameActivity}"
+        val shade = "mCurrentFocus=Window{32f73df u0 NotificationShade}"
+        val starting = FocusedWindow.Observation().updateRoot(FocusedWindow.parseProbe(game), 1000)
+        for (sample in listOf(shade, "$game\n$shade")) {
+            val observed = starting.updateRoot(FocusedWindow.parseProbe(sample), 1010)
+            assertFalse(observed.freshGame(1010))
+            assertNull(observed.window)
+        }
+    }
     @Test fun rootFocusQueryIsReadOnlyAndRequiresAuthorization() = runBlocking {
         val commands=mutableListOf<String>()
         val runner=RootCommandRunner { command,_ ->

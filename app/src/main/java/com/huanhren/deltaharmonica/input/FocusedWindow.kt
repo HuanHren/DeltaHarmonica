@@ -15,18 +15,20 @@ object FocusedWindow {
         fun updateRoot(probe: Probe?, nowMs: Long): Observation =
             if (probe == null) this else Observation(probe.window?.packageName, probe.window, nowMs)
     }
-    private val focus = Regex(
-        """^[ \t]*mCurrentFocus=Window\{([0-9A-Fa-f]+)[ \t]+u(\d+)[ \t]+([A-Za-z0-9_.]+)/[^\r\n}]+\}[ \t]*$""",
+    private val focusRecord = Regex(
+        """^[ \t]*mCurrentFocus=Window\{([0-9A-Fa-f]+)[ \t]+u(\d+)[ \t]+([^\r\n}]+)\}[ \t]*$""",
         RegexOption.MULTILINE,
     )
+    private val component = Regex("""([A-Za-z0-9_.]+)/[^\r\n}]+""")
     private val noFocus = Regex("""^[ \t]*mCurrentFocus=null[ \t]*$""", RegexOption.MULTILINE)
 
     internal fun parseProbe(output: String): Probe? {
-        val matches = focus.findAll(output).take(2).toList()
-        if (matches.size > 1) return Probe(null)
-        val match = matches.singleOrNull() ?: return if (noFocus.containsMatchIn(output)) Probe(null) else null
-        val (token, user, packageName) = match.destructured
-        return Probe(Identity(packageName, token.lowercase(), user.toIntOrNull() ?: return null))
+        val records = focusRecord.findAll(output).take(2).toList()
+        if (records.size > 1) return Probe(null)
+        val record = records.singleOrNull() ?: return if (noFocus.containsMatchIn(output)) Probe(null) else null
+        val (token, user, title) = record.destructured
+        val packageName = component.matchEntire(title)?.groupValues?.get(1) ?: return Probe(null)
+        return Probe(Identity(packageName, token.lowercase(), user.toIntOrNull() ?: return Probe(null)))
     }
 
     internal fun parseIdentity(output: String): Identity? = parseProbe(output)?.window

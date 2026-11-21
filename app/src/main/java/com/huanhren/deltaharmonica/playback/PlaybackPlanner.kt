@@ -11,6 +11,11 @@ data class PlaybackPlan(val events: List<PlannedEvent>, val regionSwitches: Int,
     val estimatedTotalMs: Long, val warnings: List<String>, val fatalErrors: List<String>, val controlGestureMs: Long, val settlingMs: Long, val combined: Boolean = false,
     val minimumTouchMs: Long = 1, val extendedNotes: Int = 0, val combinedLeadMs: Long = 40, val gestureOverheadMs: Long = 30,
     val rootTiming: RootPlaybackTiming? = null, val shortenedNotes: Int = 0, val rootPreRollMs: Long = 0)
+
+private data class RootTimingDeficit(val sourceIndex: Int, val availableMs: Long, val requiredMs: Long) {
+    val deficitMs: Long get() = requiredMs - availableMs
+}
+
 object PlaybackPlanner {
     fun mappedEventCount(script: PerformanceScript, layout: InstrumentLayout): Int {
         val profile=layout.profile ?: return 0
@@ -64,6 +69,7 @@ object PlaybackPlanner {
         val base = script.events[start].startTimeMs
         var currentRegion = initialRegion; var currentSemi = initialSemitone; var cursor=0L; var nr=0; var ns=0
         val original=script.events.subList(start,start+count)
+        val requestedStarts = LongArray(count) { ((original[it].startTimeMs - base) / speed).roundToLong() }
         val keys = noteKeys.toSortedMap().entries.distinctBy { it.value }.associate { (id, key) -> key to id }
         val rootTransition: ((Int?, Int, PitchChoice?, PitchChoice) -> Long)? = rootTiming?.let { timing ->
             { previousIndex, index, previous, next ->
@@ -72,7 +78,7 @@ object PlaybackPlanner {
                 val setup = (if (previousRegion != next.region) timing.controlSlotMs else 0L) +
                     (if (previousSemi != next.semitone) timing.controlSlotMs else 0L)
                 if (previousIndex == null) setup else {
-                    val available = ((original[index].startTimeMs - original[previousIndex].startTimeMs) / speed).roundToLong()
+                    val available = requestedStarts[index] - requestedStarts[previousIndex]
                     val availableHold = available - setup - timing.plannedGap(previous?.keyIndex == next.keyIndex, setup)
                     val preferredHold = (original[previousIndex].durationMs / speed).roundToLong()
                         .coerceIn(timing.minNoteHoldMs, MAX_GESTURE_DURATION_MS)
@@ -86,10 +92,14 @@ object PlaybackPlanner {
             PitchMapper.optimize(it, original.map { event -> event.midiNote }, initialRegion, initialSemitone,
                 keys.keys, checkActive, transitionDelayMs = rootTransition)
         }
-        var delayedCount=0; var maxDelay=0L; var extendedNotes=0; var unverifiedShort=0
+        var delayedCount=0; var maxDelay=0L; var extendedNotes=0
         var shortenedNotes = 0
         var shortenedMs = 0L
         var preRoll = 0L
+        var blockedTransitions = 0
+        var blockedRepeats = 0
+        var blockedControlChanges = 0
+        var largestDeficit: RootTimingDeficit? = null
         val minHold = rootTiming?.minNoteHoldMs ?: minimumTouchMs
         val plans = ArrayList<PlannedEvent>(count)
         original.forEachIndexed { index, event ->
@@ -113,11 +123,10 @@ object PlaybackPlanner {
                 }
                 if (positions.distinct().size != positions.size) errors.add("事件 ${start+index+1} 的触摸目标重合，请重新校准")
             }
-            val requested=((e.startTimeMs-base)/speed).roundToLong()
+            val requested = requestedStarts[index]
             val scaledDuration=(e.durationMs/speed).roundToLong()
             if (scaledDuration < minHold) extendedNotes++
             val duration=scaledDuration.coerceAtLeast(minHold)
-            if (duration < 150) unverifiedShort++
             val maxDuration=MAX_GESTURE_DURATION_MS - if(combined && (changeRegion || changeSemi)) combinedLeadMs else 0
             if (duration !in 1..maxDuration) errors.add("事件 ${start+index+1} 时长 $duration ms 超出手势范围，最大 $maxDuration ms")
             val before = when {
@@ -131,7 +140,18 @@ object PlaybackPlanner {
             val desired = requested + preRoll
             if (rootTiming != null && index > 0) {
                 val previous = plans.last()
-                val gap = rootTiming.plannedGap(previous.event.noteKeyId == e.noteKeyId, before)
+                val sameKey = previous.event.noteKeyId == e.noteKeyId
+                val gap = rootTiming.plannedGap(sameKey, before)
+                val available = requested - previous.requestedStartMs
+                val required = minHold + before + gap
+                if (available < required) {
+                    blockedTransitions++
+                    if (sameKey) blockedRepeats++
+                    if (before > 0L) blockedControlChanges++
+                    if (required - available > (largestDeficit?.deficitMs ?: 0L)) {
+                        largestDeficit = RootTimingDeficit(start + index, available, required)
+                    }
+                }
                 val end = minOf(previous.predictedEndMs, maxOf(previous.predictedStartMs + minHold, desired - before - gap))
                 if (end < previous.predictedEndMs) {
                     shortenedNotes++
@@ -152,6 +172,10 @@ object PlaybackPlanner {
             val originalEnd = ((original.last().startTimeMs - base + original.last().durationMs) / speed).roundToLong()
             val stretch = (cursor - preRoll - originalEnd).coerceAtLeast(0L)
             if (preRoll > 0) warnings.add("首音前预留 $preRoll ms 切换控制状态")
+            largestDeficit?.let { worst ->
+                warnings.add("Root 有 $blockedTransitions 处起音间隔不足，涉及同键 $blockedRepeats 处、控制切换 $blockedControlChanges 处。" +
+                    "第 ${worst.sourceIndex + 1} 个音符的起音间隔最紧，原谱仅给 ${worst.availableMs} ms，至少需要 ${worst.requiredMs} ms")
+            }
             if (stretch > 0L) warnings.add("Root 预计比所选速度的原谱延长 $stretch ms")
             if (stretch > maxOf(2_000L, originalEnd * 2L)) {
                 errors.add("当前速度的触控量超出时序预算，请降低倍速或换用较稀疏的曲谱")
@@ -160,6 +184,7 @@ object PlaybackPlanner {
         if (rootTiming == null && gestureOverheadMs > 0) warnings.add("每次手势额外预留 ${gestureOverheadMs} ms（估算，非设备实测）；休止时间可吸收，实际节奏可能变慢")
         if (extendedNotes > 0) warnings.add("$extendedNotes 个短音按最短触摸 $minHold ms 延长；后续音符可能推迟")
         if (shortenedNotes > 0) warnings.add("$shortenedNotes 个音符为后续控制或重触发缩短，共 $shortenedMs ms")
+        val unverifiedShort = plans.count { it.predictedEndMs - it.predictedStartMs < 150L }
         if (unverifiedShort > 0) warnings.add("$unverifiedShort 个音符短于此前已验证的 150 ms，真实响应尚未验证")
         return PlaybackPlan(plans, nr, ns, cursor, warnings.distinct(), errors.distinct(),
             rootTiming?.controlHoldMs ?: controlMs, rootTiming?.let { it.controlSlotMs - it.controlHoldMs } ?: settleMs,

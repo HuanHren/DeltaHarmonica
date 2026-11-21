@@ -7,6 +7,7 @@ import android.view.InputEvent
 import android.view.MotionEvent
 import com.huanhren.deltaharmonica.playback.ROOT_STROKE_DISPATCH_MARGIN_MS
 import com.huanhren.deltaharmonica.playback.ROOT_RECOVERY_WINDOW_MS
+import java.io.File
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -22,7 +23,9 @@ object RootTouchMain {
         check(Os.getuid() == 0)
         val targetUid = args[0].toInt()
         require(targetUid >= 0)
-        RootHelperSession(targetUid).run(args.getOrNull(1) == "volume")
+        val sessionId = args[1].also { require(RootSequenceProtocol.validSessionId(it)) }
+        val identity = requireNotNull(RootSequenceProtocol.decodeProcessStat(File("/proc/self/stat").readText()))
+        RootHelperSession(targetUid).run(sessionId, identity, args.getOrNull(2) == "volume")
     }
 }
 
@@ -30,39 +33,59 @@ private class RootHelperSession(targetUid: Int) {
     private val injector = RootMotionInjector(targetUid)
     private val worker = AtomicReference<Thread>()
     private val stopped = AtomicBoolean()
+    private val transportInterrupted = AtomicBoolean()
     private val busy = AtomicBoolean()
     private val safe = AtomicBoolean(true)
+    private val uncertainPointerIds = AtomicReference<Set<Int>?>()
     private val volumeStopped = AtomicBoolean()
     private val paused = AtomicBoolean()
     private val currentSequence = AtomicLong()
     private val liveThrough = AtomicLong()
     private var lastSequence = 0L
     private var upload: RootSequenceUpload? = null
-    private val output = RootHelperReplies(::requestStop)
+    private val output = RootHelperReplies(::endTransport)
 
-    fun run(watchVolume: Boolean) {
+    fun run(sessionId: String, identity: RootHelperIdentity, watchVolume: Boolean) {
         val volume = if (watchVolume) RootVolumeKeyMonitor.start(::volumeStop) else null
         if (watchVolume) output.offer(if (volume == null) "NO_VOLUME_MONITOR" else "VOLUME_READY")
-        output.offer("READY ${RootSequenceProtocol.VERSION}")
+        output.offer("READY ${RootSequenceProtocol.VERSION} $sessionId ${identity.pid} ${identity.startTicks}")
         try {
             System.`in`.bufferedReader().forEachLine(::handleCommand)
         } finally {
-            requestStop()
-            worker.get()?.join()
+            endTransport()
+            val playback = worker.get()
+            playback?.join(RootSequenceProtocol.ACK_TIMEOUT_MS)
             volume?.close()
-            output.finish(if (safe.get()) "CLOSED" else "UNCONFIRMED")
+            if (playback?.isAlive != true) {
+                val pointers = uncertainPointerIds.get()
+                val terminal = when {
+                    safe.get() -> "CLOSED"
+                    pointers.isNullOrEmpty() -> "UNCONFIRMED"
+                    else -> "UNCONFIRMED POINTERS ${pointers.sorted().joinToString(",")}"
+                }
+                output.finish(terminal)
+            }
         }
     }
 
+    @Synchronized
     private fun volumeStop() {
-        if (volumeStopped.compareAndSet(false, true)) {
+        if (volumeStopped.get() || transportInterrupted.get()) return
+        // The worker must be unable to report the stop before the cause is queued.
+        if (output.offer("VOLUME ${SystemClock.uptimeMillis()}")) {
+            volumeStopped.set(true)
             requestStop()
-            output.offer("VOLUME ${SystemClock.uptimeMillis()}")
         }
     }
 
     private fun requestStop() {
         stopped.set(true)
+        paused.set(false)
+        worker.get()?.let(LockSupport::unpark)
+    }
+
+    private fun endTransport() {
+        transportInterrupted.set(true)
         paused.set(false)
         worker.get()?.let(LockSupport::unpark)
     }
@@ -89,6 +112,11 @@ private class RootHelperSession(targetUid: Int) {
             command == "STOP" && isActive -> requestStop()
             command == "STOP" && hasUpload -> {
                 upload = null
+                reply(id, "END STOPPED 0")
+            }
+            command == "STOP" && !busy.get() && upload == null && id > lastSequence -> {
+                // Priority STOP can arrive before a superseded QUEUE reaches the writer.
+                lastSequence = id
                 reply(id, "END STOPPED 0")
             }
             command == "PAUSE" && isActive -> {
@@ -155,8 +183,9 @@ private class RootHelperSession(targetUid: Int) {
     }
 
     private fun checkActive(sequence: Boolean, now: Long) {
-        if (stopped.get() || volumeStopped.get() || (sequence && now >= liveThrough.get())) {
-            throw InterruptedException()
+        if (stopped.get() || volumeStopped.get()) throw InterruptedException()
+        if (transportInterrupted.get() || (sequence && now >= liveThrough.get())) {
+            throw RootTransportInterrupted()
         }
     }
 
@@ -200,7 +229,9 @@ private class RootHelperSession(targetUid: Int) {
         sequential = scheduledStartMs != null,
         settlingSlackMs = ROOT_STROKE_DISPATCH_MARGIN_MS,
         emit = injector::emit,
-    )
+    ).also { outcome ->
+        if (outcome.status == "UNCONFIRMED") uncertainPointerIds.set(outcome.uncertainPointerIds)
+    }
 
     private fun startSequence(id: Long, steps: List<RootSequenceStep>, pauseInitially: Boolean) {
         extendHeartbeat()
@@ -244,9 +275,10 @@ private class RootHelperSession(targetUid: Int) {
 
     private fun startWorker(name: String, pauseInitially: Boolean, task: Runnable) {
         stopped.set(false)
+        uncertainPointerIds.set(null)
         paused.set(pauseInitially)
         busy.set(true)
-        val playback = Thread(task, name)
+        val playback = Thread(task, name).apply { isDaemon = true }
         worker.set(playback)
         playback.start()
     }
@@ -327,12 +359,14 @@ private class RootHelperReplies(onFailure: Runnable) {
                 failure.run()
                 break
             }
-            if (line == "CLOSED" || line == "UNCONFIRMED") break
+            if (line == "CLOSED" || line.startsWith("UNCONFIRMED")) break
         }
     }
 
-    fun offer(line: String) {
-        if (broken.get() || !queue.offer(line)) failure.run()
+    fun offer(line: String): Boolean {
+        if (!broken.get() && queue.offer(line)) return true
+        failure.run()
+        return false
     }
 
     fun finish(line: String) {

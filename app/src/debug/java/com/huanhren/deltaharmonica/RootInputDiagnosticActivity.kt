@@ -172,17 +172,22 @@ class RootInputDiagnosticActivity : Activity() {
         )
         val plan = PlaybackPlanner.plan(song, layout, Region.NATURAL, false, 0, events.size, 1.0)
         val runner = PlaybackRunner()
-        PlaybackPreparation.activeRunner = runner
+        val priorProgress = PlaybackPreparation.progress.value
+        val owner = checkNotNull(PlaybackPreparation.beginSession {})
+        if (!PlaybackPreparation.attachRunner(owner, runner)) {
+            PlaybackPreparation.finishSession(owner, priorProgress)
+            error("Playback session already stopping")
+        }
         val automatic = intent.getBooleanExtra("automatic", false)
         val stopJob = if (automatic) scope.launch {
             kotlinx.coroutines.withTimeout(5_000) {
                 while (receiver.active.isEmpty()) delay(10)
             }
             delay(500)
-            PlaybackPreparation.stopPlayback()
+            PlaybackPreparation.stopPlayback(owner)
         } else null
         try {
-            withTouch(onVolumeDown = { PlaybackPreparation.stopPlayback() }) { touch ->
+            withTouch(onVolumeDown = { PlaybackPreparation.stopPlayback(owner) }) { touch ->
                 val result = runner.run(
                     plan, {}, {}, { hasWindowFocus() }, { id, duration ->
                         touch.play(CombinedGesture.create(receiver.point(id), duration, emptyList()), stop = { runner.stopRequested })
@@ -204,7 +209,7 @@ class RootInputDiagnosticActivity : Activity() {
             Log.i(TAG, "RECOVERY NOTE_2 received")
         } finally {
             stopJob?.cancel()
-            PlaybackPreparation.activeRunner = null
+            PlaybackPreparation.finishSession(owner, priorProgress)
         }
     }
 
