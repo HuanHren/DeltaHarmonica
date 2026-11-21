@@ -1,5 +1,7 @@
 # Root 会话恢复 · 2.4.0-rc.4
 
+后续的独立执行线程监督、协议 v4 与自动恢复上限见 [rc.5 可靠性验收](RC5_RELIABILITY_REPORT.md)。
+
 ## rc.3 审计
 
 开始工作时，`feature/root-continuous-timeline` 工作树干净，本地与 `origin` 均为 `fa80864`，草稿 PR #3 打开。归档草稿可正向应用，无法反向应用，未进入 rc.3 分支。草稿的同次启动重核仅适用于已收到 helper 结束回执的情况。

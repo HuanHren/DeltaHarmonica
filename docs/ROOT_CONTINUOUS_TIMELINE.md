@@ -1,5 +1,7 @@
 # Root 连续触控候选验收
 
+2.4.0-rc.5 的执行器恢复、342 音边界及两档软件时序矩阵见 [rc.5 可靠性验收](RC5_RELIABILITY_REPORT.md)。真实游戏结果为 **NOT TESTED**。
+
 2.4.0-rc.4 的会话、应用内恢复、故障注入和整曲软件调度见 [Root 会话恢复报告](ROOT_RECOVERY_REPORT.md)。以下实奏数据来自 2.3.0 至 rc.3 的历史测试，rc.4 真实游戏发声为 **NOT TESTED**。
 
 ## A. 实现状态
